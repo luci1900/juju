@@ -45,6 +45,8 @@ import (
 	modeldefaultsstate "github.com/juju/juju/domain/modeldefaults/state"
 	secretbackendservice "github.com/juju/juju/domain/secretbackend/service"
 	secretbackendstate "github.com/juju/juju/domain/secretbackend/state"
+	sshservice "github.com/juju/juju/domain/ssh/service"
+	sshstatecontroller "github.com/juju/juju/domain/ssh/state/controller"
 	tracingservice "github.com/juju/juju/domain/tracing/service"
 	tracingstate "github.com/juju/juju/domain/tracing/state"
 	upgradeservice "github.com/juju/juju/domain/upgrade/service"
@@ -229,6 +231,14 @@ func (s *ControllerServices) Tracing() *tracingservice.WatchableService {
 			changestream.NewTxnRunnerFactory(s.controllerDB),
 		),
 		s.controllerWatcherFactory("tracing"),
+	)
+}
+
+// SSHHostKey returns the controller SSH host key service, which manages the
+// ED25519 private key used by the SSH jump server.
+func (s *ControllerServices) SSHHostKey() *sshservice.ControllerService {
+	return sshservice.NewControllerService(
+		sshstatecontroller.NewState(changestream.NewTxnRunnerFactory(s.controllerDB)),
 	)
 }
 

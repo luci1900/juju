@@ -32,9 +32,11 @@ func TestWorkerSuite(t *testing.T) {
 func newServerWrapperWorkerConfig(
 	c *tc.C, ctrl *gomock.Controller, modifier func(*ServerWrapperWorkerConfig),
 ) *ServerWrapperWorkerConfig {
+	sshHostKeyService := NewMockSSHHostKeyService(ctrl)
 	cfg := &ServerWrapperWorkerConfig{
 		NewServerWorker:         func(ServerWorkerConfig) (worker.Worker, error) { return nil, nil },
 		ControllerConfigService: NewMockControllerConfigService(ctrl),
+		SSHHostKeyService:       sshHostKeyService,
 		Logger:                  loggertesting.WrapCheckLog(c),
 		SessionHandler:          &MockSessionHandler{},
 	}
@@ -103,8 +105,12 @@ func (s *workerSuite) TestSSHServerWrapperWorkerCanBeKilled(c *tc.C) {
 	}
 	controllerConfigService.EXPECT().ControllerConfig(gomock.Any()).Return(ctrlCfg, nil).Times(1)
 
+	sshHostKeyService := NewMockSSHHostKeyService(ctrl)
+	sshHostKeyService.EXPECT().GetControllerSSHHostKey(gomock.Any()).Return("test-key", nil).Times(1)
+
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
+		SSHHostKeyService:       sshHostKeyService,
 		Logger:                  loggertesting.WrapCheckLog(c),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
 			return serverWorker, nil
@@ -179,8 +185,12 @@ func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorker(c *tc.C) {
 		Times(1)
 
 	var serverStarted int32
+	sshHostKeyService := NewMockSSHHostKeyService(ctrl)
+	sshHostKeyService.EXPECT().GetControllerSSHHostKey(gomock.Any()).Return("test-key", nil).Times(1)
+
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
+		SSHHostKeyService:       sshHostKeyService,
 		Logger:                  loggertesting.WrapCheckLog(c),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
 			atomic.StoreInt32(&serverStarted, 1)
@@ -265,8 +275,12 @@ func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorkerOnPortChange
 		).
 		Times(1)
 
+	sshHostKeyServicePort := NewMockSSHHostKeyService(ctrl)
+	sshHostKeyServicePort.EXPECT().GetControllerSSHHostKey(gomock.Any()).Return("test-key", nil).Times(1)
+
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
+		SSHHostKeyService:       sshHostKeyServicePort,
 		Logger:                  loggertesting.WrapCheckLog(c),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
 			c.Check(swc.Port, tc.Equals, 22)
@@ -310,8 +324,12 @@ func (s *workerSuite) TestSSHServerWrapperWorkerConfigWatcherClosed(c *tc.C) {
 		controller.SSHMaxConcurrentConnections: 10,
 	}, nil).Times(1)
 
+	sshHostKeyServiceWatcher := NewMockSSHHostKeyService(ctrl)
+	sshHostKeyServiceWatcher.EXPECT().GetControllerSSHHostKey(gomock.Any()).Return("test-key", nil).Times(1)
+
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
+		SSHHostKeyService:       sshHostKeyServiceWatcher,
 		Logger:                  loggertesting.WrapCheckLog(c),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
 			return serverWorker, nil
@@ -355,8 +373,12 @@ func (s *workerSuite) TestWrapperWorkerReport(c *tc.C) {
 	serverWorker := workertest.NewErrorWorker(nil)
 	defer workertest.DirtyKill(c, serverWorker)
 
+	sshHostKeyServiceReport := NewMockSSHHostKeyService(ctrl)
+	sshHostKeyServiceReport.EXPECT().GetControllerSSHHostKey(gomock.Any()).Return("test-key", nil).Times(1)
+
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
+		SSHHostKeyService:       sshHostKeyServiceReport,
 		Logger:                  loggertesting.WrapCheckLog(c),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
 			return &reportWorker{serverWorker}, nil

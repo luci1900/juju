@@ -95,6 +95,8 @@ import (
 	secretstate "github.com/juju/juju/domain/secret/state"
 	secretbackendservice "github.com/juju/juju/domain/secretbackend/service"
 	secretbackendstate "github.com/juju/juju/domain/secretbackend/state"
+	sshservice "github.com/juju/juju/domain/ssh/service"
+	sshstatemodel "github.com/juju/juju/domain/ssh/state/model"
 	statusservice "github.com/juju/juju/domain/status/service"
 	statusstatecontroller "github.com/juju/juju/domain/status/state/controller"
 	statusstatemodel "github.com/juju/juju/domain/status/state/model"
@@ -669,5 +671,13 @@ func (s *ModelServices) ControllerUpgrader() *controllerupgraderservice.Service 
 		agentBinaryFinder,
 		controllerSt,
 		controllerModelSt,
+	)
+}
+
+// SSHVirtualHostKey returns the model SSH host key service, which manages virtual
+// ED25519 private keys for machine and unit routing targets.
+func (s *ModelServices) SSHVirtualHostKey() *sshservice.ModelService {
+	return sshservice.NewModelService(
+		sshstatemodel.NewState(changestream.NewTxnRunnerFactory(s.modelDB)),
 	)
 }
