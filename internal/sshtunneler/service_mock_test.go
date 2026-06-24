@@ -10,14 +10,13 @@
 package sshtunneler
 
 import (
-	"context"
+	context "context"
 	net "net"
 
 	gomock "github.com/canonical/gomock/gomock"
-	ssh "golang.org/x/crypto/ssh"
-
 	network "github.com/juju/juju/core/network"
-	domainssh "github.com/juju/juju/domain/ssh"
+	ssh "github.com/juju/juju/domain/ssh"
+	ssh0 "golang.org/x/crypto/ssh"
 )
 
 // MockConnRequestState is a mock of ConnRequestState interface.
@@ -30,7 +29,7 @@ type MockConnRequestState struct {
 // MockConnRequestStateMockRecorder is the mock recorder for MockConnRequestState.
 type MockConnRequestStateMockRecorder struct {
 	mock                        *MockConnRequestState
-	insertSSHConnRequestExpects []*gomock.Call2_1[context.Context, domainssh.SSHConnRequest, error]
+	insertSSHConnRequestExpects []*gomock.Call2_1[context.Context, ssh.SSHConnRequest, error]
 }
 
 // NewMockConnRequestState creates a new mock instance.
@@ -46,7 +45,7 @@ func (m *MockConnRequestState) EXPECT() *MockConnRequestStateMockRecorder {
 }
 
 // InsertSSHConnRequest mocks base method.
-func (m *MockConnRequestState) InsertSSHConnRequest(ctx context.Context, args domainssh.SSHConnRequest) error {
+func (m *MockConnRequestState) InsertSSHConnRequest(ctx context.Context, args ssh.SSHConnRequest) error {
 	m.ctrl.T.Helper()
 	return gomock.Dispatch2_1(&m.recorder.insertSSHConnRequestExpects, m.ctrl, m, "InsertSSHConnRequest", ctx, args)
 }
@@ -54,14 +53,14 @@ func (m *MockConnRequestState) InsertSSHConnRequest(ctx context.Context, args do
 // InsertSSHConnRequest indicates an expected call of InsertSSHConnRequest.
 func (mr *MockConnRequestStateMockRecorder) InsertSSHConnRequest(ctx, args any) *MockConnRequestStateInsertSSHConnRequestCall {
 	mr.mock.ctrl.T.Helper()
-	call := gomock.NewCall2_1[context.Context, domainssh.SSHConnRequest, error](mr.mock.ctrl.T, mr.mock, "InsertSSHConnRequest", gomock.EnsureMatcher(ctx), gomock.EnsureMatcher(args))
+	call := gomock.NewCall2_1[context.Context, ssh.SSHConnRequest, error](mr.mock.ctrl.T, mr.mock, "InsertSSHConnRequest", gomock.EnsureMatcher(ctx), gomock.EnsureMatcher(args))
 	mr.insertSSHConnRequestExpects = append(mr.insertSSHConnRequestExpects, call)
 	mr.mock.ctrl.Track(call.Call)
 	return call
 }
 
 // MockConnRequestStateInsertSSHConnRequestCall is the typed call wrapper for InsertSSHConnRequest.
-type MockConnRequestStateInsertSSHConnRequestCall = gomock.Call2_1[context.Context, domainssh.SSHConnRequest, error]
+type MockConnRequestStateInsertSSHConnRequestCall = gomock.Call2_1[context.Context, ssh.SSHConnRequest, error]
 
 // MockMachineState is a mock of MachineState interface.
 type MockMachineState struct {
@@ -159,7 +158,7 @@ type MockSSHDial struct {
 // MockSSHDialMockRecorder is the mock recorder for MockSSHDial.
 type MockSSHDialMockRecorder struct {
 	mock        *MockSSHDial
-	dialExpects []*gomock.Call4_2[net.Conn, string, ssh.Signer, ssh.HostKeyCallback, *ssh.Client, error]
+	dialExpects []*gomock.Call4_2[net.Conn, string, ssh0.Signer, ssh0.HostKeyCallback, *ssh0.Client, error]
 }
 
 // NewMockSSHDial creates a new mock instance.
@@ -175,7 +174,7 @@ func (m *MockSSHDial) EXPECT() *MockSSHDialMockRecorder {
 }
 
 // Dial mocks base method.
-func (m *MockSSHDial) Dial(conn net.Conn, username string, privateKey ssh.Signer, hostKeyCallback ssh.HostKeyCallback) (*ssh.Client, error) {
+func (m *MockSSHDial) Dial(conn net.Conn, username string, privateKey ssh0.Signer, hostKeyCallback ssh0.HostKeyCallback) (*ssh0.Client, error) {
 	m.ctrl.T.Helper()
 	return gomock.Dispatch4_2(&m.recorder.dialExpects, m.ctrl, m, "Dial", conn, username, privateKey, hostKeyCallback)
 }
@@ -183,11 +182,11 @@ func (m *MockSSHDial) Dial(conn net.Conn, username string, privateKey ssh.Signer
 // Dial indicates an expected call of Dial.
 func (mr *MockSSHDialMockRecorder) Dial(conn, username, privateKey, hostKeyCallback any) *MockSSHDialDialCall {
 	mr.mock.ctrl.T.Helper()
-	call := gomock.NewCall4_2[net.Conn, string, ssh.Signer, ssh.HostKeyCallback, *ssh.Client, error](mr.mock.ctrl.T, mr.mock, "Dial", gomock.EnsureMatcher(conn), gomock.EnsureMatcher(username), gomock.EnsureMatcher(privateKey), gomock.EnsureMatcher(hostKeyCallback))
+	call := gomock.NewCall4_2[net.Conn, string, ssh0.Signer, ssh0.HostKeyCallback, *ssh0.Client, error](mr.mock.ctrl.T, mr.mock, "Dial", gomock.EnsureMatcher(conn), gomock.EnsureMatcher(username), gomock.EnsureMatcher(privateKey), gomock.EnsureMatcher(hostKeyCallback))
 	mr.dialExpects = append(mr.dialExpects, call)
 	mr.mock.ctrl.Track(call.Call)
 	return call
 }
 
 // MockSSHDialDialCall is the typed call wrapper for Dial.
-type MockSSHDialDialCall = gomock.Call4_2[net.Conn, string, ssh.Signer, ssh.HostKeyCallback, *ssh.Client, error]
+type MockSSHDialDialCall = gomock.Call4_2[net.Conn, string, ssh0.Signer, ssh0.HostKeyCallback, *ssh0.Client, error]
