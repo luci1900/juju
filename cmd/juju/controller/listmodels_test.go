@@ -9,6 +9,7 @@ import (
 	stdtesting "testing"
 	"time"
 
+	"github.com/juju/errors"
 	"github.com/juju/names/v6"
 	"github.com/juju/tc"
 
@@ -628,4 +629,106 @@ func (s *ModelsSuite) TestAllModels(c *tc.C) {
 	_, err = cmdtesting.RunCommand(c, s.newCommand())
 	c.Assert(err, tc.ErrorIsNil)
 	assertAPICallsArgs(false)
+}
+
+// --- --all-controllers tests ---
+
+type AllControllersSuite struct {
+	testing.FakeJujuXDGDataHomeSuite
+	store *jujuclient.MemStore
+}
+
+func TestAllControllersSuite(t *stdtesting.T) {
+	tc.Run(t, &AllControllersSuite{})
+}
+
+func (s *AllControllersSuite) SetUpTest(c *tc.C) {
+	s.FakeJujuXDGDataHomeSuite.SetUpTest(c)
+	s.store = jujuclient.NewMemStore()
+	s.store.CurrentControllerName = "alpha"
+	s.store.Controllers["alpha"] = jujuclient.ControllerDetails{}
+	s.store.Controllers["beta"] = jujuclient.ControllerDetails{}
+	s.store.Accounts["alpha"] = jujuclient.AccountDetails{User: "admin"}
+	s.store.Accounts["beta"] = jujuclient.AccountDetails{User: "admin"}
+	s.store.Models["alpha"] = &jujuclient.ControllerModels{}
+	s.store.Models["beta"] = &jujuclient.ControllerModels{}
+}
+
+func (s *AllControllersSuite) makeAPIForControllers(apis map[string]controller.ModelManagerAPIForTest) func(ctx context.Context, controllerName string) (controller.ModelManagerAPIForTest, error) {
+	return func(_ context.Context, controllerName string) (controller.ModelManagerAPIForTest, error) {
+		api, ok := apis[controllerName]
+		if !ok {
+			return nil, errors.Errorf("unexpected controller %q", controllerName)
+		}
+		return api, nil
+	}
+}
+
+func (s *AllControllersSuite) TestAllControllersTabularGrouped(c *tc.C) {
+	alphaModels := []base.UserModel{{Name: "m1", Qualifier: "admin", UUID: "uuid-alpha-m1", Type: model.IAAS}}
+	betaModels := []base.UserModel{{Name: "m2", Qualifier: "admin", UUID: "uuid-beta-m2", Type: model.IAAS}}
+
+	alphaAPI := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}, infos: convert(alphaModels)}
+	betaAPI := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}, infos: convert(betaModels)}
+
+	cmd := controller.NewListModelsCommandForTestWithControllerResolver(s.store,
+		func(ctx context.Context, name string) (controller.ModelManagerAPIForTest, error) {
+			switch name {
+			case "alpha":
+				return alphaAPI, nil
+			case "beta":
+				return betaAPI, nil
+			}
+			return nil, errors.Errorf("unexpected controller %q", name)
+		},
+	)
+
+	ctx, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	out := cmdtesting.Stdout(ctx)
+	c.Check(out, tc.Contains, "Controller: alpha")
+	c.Check(out, tc.Contains, "Controller: beta")
+	c.Check(out, tc.Contains, "m1")
+	c.Check(out, tc.Contains, "m2")
+}
+
+func (s *AllControllersSuite) TestAllControllersSkipsUnreachable(c *tc.C) {
+	alphaModels := []base.UserModel{{Name: "m1", Qualifier: "admin", UUID: "uuid-alpha-m1", Type: model.IAAS}}
+	alphaAPI := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}, infos: convert(alphaModels)}
+
+	cmd := controller.NewListModelsCommandForTestWithControllerResolver(s.store,
+		func(ctx context.Context, name string) (controller.ModelManagerAPIForTest, error) {
+			if name == "alpha" {
+				return alphaAPI, nil
+			}
+			return nil, errors.Errorf("cannot connect to %q", name)
+		},
+	)
+
+	ctx, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(cmdtesting.Stdout(ctx), tc.Contains, "Controller: alpha")
+	c.Check(cmdtesting.Stdout(ctx), tc.Contains, "m1")
+	c.Check(cmdtesting.Stderr(ctx), tc.Contains, `could not list models on controller "beta"`)
+}
+
+func (s *AllControllersSuite) TestAllControllersNoModelsMessage(c *tc.C) {
+	alphaAPI := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+	betaAPI := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+
+	cmd := controller.NewListModelsCommandForTestWithControllerResolver(s.store,
+		func(ctx context.Context, name string) (controller.ModelManagerAPIForTest, error) {
+			switch name {
+			case "alpha":
+				return alphaAPI, nil
+			case "beta":
+				return betaAPI, nil
+			}
+			return nil, errors.Errorf("unexpected controller %q", name)
+		},
+	)
+
+	ctx, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(cmdtesting.Stderr(ctx), tc.Contains, controller.NoModelsMessage)
 }

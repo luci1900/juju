@@ -7,7 +7,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/juju/ansiterm"
@@ -16,6 +18,7 @@ import (
 	"github.com/juju/names/v6"
 
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/client/modelmanager"
 	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/cmd"
@@ -52,14 +55,20 @@ type ModelsSysAPI interface {
 // current user can access on the current controller.
 type modelsCommand struct {
 	modelcmd.ControllerCommandBase
-	out          cmd.Output
-	all          bool
-	loggedInUser string
-	user         string
-	listUUID     bool
-	exactTime    bool
-	modelAPI     ModelManagerAPI
-	sysAPI       ModelsSysAPI
+	out            cmd.Output
+	all            bool
+	allControllers bool
+	loggedInUser   string
+	user           string
+	listUUID       bool
+	exactTime      bool
+	modelAPI       ModelManagerAPI
+	sysAPI         ModelsSysAPI
+
+	// newModelManagerAPIForController, when set (in tests), returns a
+	// ModelManagerAPI for a named controller, allowing the
+	// per-controller fan-out to be exercised without real connections.
+	newModelManagerAPIForController func(ctx context.Context, controllerName string) (ModelManagerAPI, error)
 
 	runVars modelsRunValues
 }
@@ -83,6 +92,7 @@ func (c *modelsCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ControllerCommandBase.SetFlags(f)
 	f.StringVar(&c.user, "user", "", "The user to list models for (administrative users only)")
 	f.BoolVar(&c.all, "all", false, "Lists all models, regardless of user accessibility (administrative users only)")
+	f.BoolVar(&c.allControllers, "all-controllers", false, "List models across all registered controllers")
 	f.BoolVar(&c.listUUID, "uuid", false, "Display UUID for models")
 	f.BoolVar(&c.exactTime, "exact-time", false, "Use full timestamps")
 	c.out.AddFlags(f, "tabular", map[string]cmd.Formatter{
@@ -111,12 +121,17 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 		return errors.NotValidf("user %q", c.user)
 	}
 
+	// TODO(perrito666) 2016-05-02 lp:1558657
+	now := time.Now()
+
+	if c.allControllers {
+		return c.runAcrossControllers(ctx, now)
+	}
+
 	c.runVars = modelsRunValues{
 		currentUser:    c.user,
 		controllerName: controllerName,
 	}
-	// TODO(perrito666) 2016-05-02 lp:1558657
-	now := time.Now()
 
 	modelmanagerAPI, err := c.getModelManagerAPI(ctx)
 	if err != nil {
@@ -135,6 +150,179 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 		fmt.Fprintln(ctx.Stderr, noModelsMessage)
 	}
 	return nil
+}
+
+// runAcrossControllers queries every registered controller concurrently and
+// writes the combined model list. Each controller's models are grouped under
+// a "Controller: <name>" heading in tabular output. A controller that cannot
+// be reached is reported as a warning and skipped; the rest are still shown.
+func (c *modelsCommand) runAcrossControllers(ctx *cmd.Context, now time.Time) error {
+	allCtrlMap, err := c.ClientStore().AllControllers()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	if len(allCtrlMap) == 0 {
+		return errors.New("no controllers registered")
+	}
+
+	controllerNames := make([]string, 0, len(allCtrlMap))
+	for name := range allCtrlMap {
+		controllerNames = append(controllerNames, name)
+	}
+	sort.Strings(controllerNames)
+
+	type controllerResult struct {
+		controllerName string
+		summaries      []ModelSummary
+		runVars        modelsRunValues
+		err            error
+	}
+
+	results := make([]controllerResult, len(controllerNames))
+	var wg sync.WaitGroup
+	for i, name := range controllerNames {
+		wg.Add(1)
+		go func(i int, controllerName string) {
+			defer wg.Done()
+			summaries, rv, err := c.listModelsOnController(ctx, controllerName, now)
+			results[i] = controllerResult{
+				controllerName: controllerName,
+				summaries:      summaries,
+				runVars:        rv,
+				err:            err,
+			}
+		}(i, name)
+	}
+	wg.Wait()
+
+	// Write output per controller in sorted order.
+	haveAny := false
+	for _, r := range results {
+		if r.err != nil {
+			fmt.Fprintf(ctx.GetStderr(), "could not list models on controller %q: %v\n", r.controllerName, r.err)
+			continue
+		}
+		// Apply aggregate column flags from this controller's results.
+		if r.runVars.hasMachinesCount {
+			c.runVars.hasMachinesCount = true
+		}
+		if r.runVars.hasCoresCount {
+			c.runVars.hasCoresCount = true
+		}
+		if r.runVars.hasUnitsCount {
+			c.runVars.hasUnitsCount = true
+		}
+		if len(r.summaries) > 0 {
+			haveAny = true
+		}
+	}
+
+	if !haveAny && c.out.Name() == "tabular" {
+		fmt.Fprintln(ctx.Stderr, noModelsMessage)
+		return nil
+	}
+
+	// For non-tabular formats, emit a flat list of all models across all
+	// controllers.
+	if c.out.Name() != "tabular" {
+		var allSummaries []ModelSummary
+		for _, r := range results {
+			if r.err == nil {
+				allSummaries = append(allSummaries, r.summaries...)
+			}
+		}
+		return c.out.Write(ctx, ModelSummarySet{Models: allSummaries})
+	}
+
+	// Tabular: write each controller's models as a separate section.
+	for _, r := range results {
+		if r.err != nil {
+			continue
+		}
+		// Set the controller name for the section header.
+		c.runVars.controllerName = r.controllerName
+		c.runVars.currentUser = r.runVars.currentUser
+		current, err := c.ClientStore().CurrentModel(r.controllerName)
+		if err != nil {
+			current = ""
+		}
+		set := ModelSummarySet{
+			Models:                r.summaries,
+			CurrentModelQualified: current,
+		}
+		if current != "" {
+			// Determine unqualified current model name.
+			set.CurrentModel = common.UserModelName(current, r.runVars.currentUser)
+		}
+		if err := c.out.Write(ctx, set); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listModelsOnController dials the named controller, fetches model summaries
+// and returns them along with the per-controller runVars (column flags, user).
+func (c *modelsCommand) listModelsOnController(ctx *cmd.Context, controllerName string, now time.Time) ([]ModelSummary, modelsRunValues, error) {
+	accountDetails, err := c.ClientStore().AccountDetails(controllerName)
+	if err != nil {
+		return nil, modelsRunValues{}, errors.Trace(err)
+	}
+	user := accountDetails.User
+	if !names.IsValidUser(user) {
+		return nil, modelsRunValues{}, errors.NotValidf("user %q for controller %q", user, controllerName)
+	}
+
+	api, err := c.getModelManagerAPIForController(ctx, controllerName)
+	if err != nil {
+		return nil, modelsRunValues{}, errors.Trace(err)
+	}
+	defer api.Close()
+
+	results, err := api.ListModelSummaries(ctx, user, c.all)
+	if err != nil {
+		return nil, modelsRunValues{}, errors.Trace(err)
+	}
+
+	rv := modelsRunValues{
+		currentUser:    user,
+		controllerName: controllerName,
+	}
+	// We need a temporary modelsCommand to collect column flags while parsing
+	// summaries, then copy the flags back.
+	tmp := &modelsCommand{exactTime: c.exactTime, runVars: rv}
+	var summaries []ModelSummary
+	for _, result := range results {
+		if result.Error != nil {
+			ctx.Infof("%s", result.Error.Error())
+			continue
+		}
+		ms, err := tmp.modelSummaryFromParams(result, now)
+		if err != nil {
+			ctx.Infof("%s", err.Error())
+			continue
+		}
+		ms.ControllerName = controllerName
+		summaries = append(summaries, ms)
+	}
+	rv.hasMachinesCount = tmp.runVars.hasMachinesCount
+	rv.hasCoresCount = tmp.runVars.hasCoresCount
+	rv.hasUnitsCount = tmp.runVars.hasUnitsCount
+	return summaries, rv, nil
+}
+
+// getModelManagerAPIForController returns a ModelManagerAPI for the named
+// controller. In tests, newModelManagerAPIForController may be set to avoid
+// real connections.
+func (c *modelsCommand) getModelManagerAPIForController(ctx context.Context, controllerName string) (ModelManagerAPI, error) {
+	if c.newModelManagerAPIForController != nil {
+		return c.newModelManagerAPIForController(ctx, controllerName)
+	}
+	root, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), controllerName, "")
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return modelmanager.NewClient(root), nil
 }
 
 func (c *modelsCommand) currentModelName() (qualified, name string) {
@@ -456,9 +644,14 @@ The models listed here are either models you have created yourself, or
 models which have been shared with you. Default values for user and
 controller are, respectively, the current user and the current controller.
 The active model is denoted by an asterisk.
+
+Use --all-controllers to list models across every controller registered
+locally (see ` + "`juju controllers`" + `). Results are grouped by controller;
+a controller that cannot be reached is reported as a warning and skipped.
 `
 
 const listModelsExamples = `
     juju models
     juju models --user bob
+    juju models --all-controllers
 `

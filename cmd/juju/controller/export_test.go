@@ -78,6 +78,24 @@ func NewListModelsCommandForTest(modelAPI ModelManagerAPI, sysAPI ModelsSysAPI, 
 	return modelcmd.WrapController(c)
 }
 
+// ModelManagerAPIForTest is an exported alias of the unexported
+// ModelManagerAPI interface, for use by external test packages.
+type ModelManagerAPIForTest = ModelManagerAPI
+
+// NewListModelsCommandForTestWithControllerResolver returns a ListModelsCommand
+// whose per-controller ModelManagerAPI is resolved via the supplied factory,
+// exercising the --all-controllers fan-out without real connections.
+func NewListModelsCommandForTestWithControllerResolver(
+	store jujuclient.ClientStore,
+	newAPIForController func(ctx context.Context, controllerName string) (ModelManagerAPI, error),
+) cmd.Command {
+	c := &modelsCommand{
+		newModelManagerAPIForController: newAPIForController,
+	}
+	c.SetClientStore(store)
+	return modelcmd.WrapController(c)
+}
+
 // NewRegisterCommandForTest returns a RegisterCommand with the function used
 // to open the API connection mocked out.
 func NewRegisterCommandForTest(apiOpen api.OpenFunc, listModels func(context.Context, jujuclient.ClientStore, string, string) ([]base.UserModel, error), store jujuclient.ClientStore) modelcmd.Command {
