@@ -5,9 +5,7 @@ package crossmodel
 
 import (
 	"context"
-	"fmt"
 	"sort"
-	"sync"
 
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
@@ -15,6 +13,7 @@ import (
 
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/cmd"
+	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/core/model"
@@ -94,16 +93,6 @@ func (c *findCommand) Init(args []string) (err error) {
 	return nil
 }
 
-// controllerSource returns the controller name to search for offers on, or the
-// empty string when the search should fan out across all registered
-// controllers.
-func (c *findCommand) controllerSource() string {
-	if c.allControllers {
-		return ""
-	}
-	return c.source
-}
-
 // Info implements Command.Info.
 func (c *findCommand) Info() *cmd.Info {
 	return jujucmd.Info(&cmd.Info{
@@ -154,12 +143,11 @@ func (c *findCommand) Run(ctx *cmd.Context) (err error) {
 		}}
 	}
 
-	var output map[string]ApplicationOfferResult
-	if c.allControllers {
-		output, err = c.findAcrossControllers(ctx, loggedInUser, filter)
-	} else {
-		output, err = c.findOnController(ctx, c.source, loggedInUser, filter)
+	controllers, err := c.targetControllers()
+	if err != nil {
+		return errors.Trace(err)
 	}
+	output, err := c.findOffers(ctx, controllers, loggedInUser, filter)
 	if err != nil {
 		return errors.Trace(err)
 	}
@@ -168,6 +156,54 @@ func (c *findCommand) Run(ctx *cmd.Context) (err error) {
 		return errors.New("no matching application offers found")
 	}
 	return c.out.Write(ctx, output)
+}
+
+// targetControllers returns the list of controller names to search. When
+// --all-controllers is set it expands to the full store (sorted); otherwise it
+// is a single-element slice containing c.source.
+func (c *findCommand) targetControllers() ([]string, error) {
+	if !c.allControllers {
+		return []string{c.source}, nil
+	}
+	all, err := c.ClientStore().AllControllers()
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	if len(all) == 0 {
+		return nil, errors.New("no controllers registered")
+	}
+	names := make([]string, 0, len(all))
+	for name := range all {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
+// findOffers fans out the search across the supplied controllers concurrently
+// and merges the results. Errors are surfaced directly for a single-controller
+// search, and as per-controller warnings for a multi-controller fan-out.
+func (c *findCommand) findOffers(
+	ctx *cmd.Context, controllers []string, loggedInUser names.UserTag, filter crossmodel.ApplicationOfferFilter,
+) (map[string]ApplicationOfferResult, error) {
+	raw := common.FanOutToControllerNames(
+		controllers,
+		func(controllerName string) (map[string]ApplicationOfferResult, error) {
+			return c.findOnController(ctx, controllerName, loggedInUser, filter)
+		},
+	)
+	perController, err := common.CollectResults(ctx, "search", raw)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	merged := make(map[string]ApplicationOfferResult)
+	for _, offers := range perController {
+		for url, offer := range offers {
+			merged[url] = offer
+		}
+	}
+	return merged, nil
 }
 
 // findOnController queries a single controller for matching offers.
@@ -185,63 +221,6 @@ func (c *findCommand) findOnController(
 		return nil, errors.Trace(err)
 	}
 	return convertFoundOffers(controllerName, loggedInUser, found...)
-}
-
-// findAcrossControllers fans out the offer search across every registered
-// controller in the client store, querying each concurrently and merging the
-// results. Each result's offer URL is namespaced by its source controller, so
-// the merged output presents a unified, cross-controller offer catalogue.
-//
-// A single unreachable or erroring controller does not fail the whole search:
-// the error is reported as a warning and the remaining controllers' offers are
-// still returned. The command only fails if no offers are found at all.
-func (c *findCommand) findAcrossControllers(
-	ctx *cmd.Context, loggedInUser names.UserTag, filter crossmodel.ApplicationOfferFilter,
-) (map[string]ApplicationOfferResult, error) {
-	controllers, err := c.ClientStore().AllControllers()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-	if len(controllers) == 0 {
-		return nil, errors.New("no controllers registered")
-	}
-
-	// Query controllers in a deterministic order so that merge behaviour and
-	// per-controller warnings are stable.
-	controllerNames := make([]string, 0, len(controllers))
-	for name := range controllers {
-		controllerNames = append(controllerNames, name)
-	}
-	sort.Strings(controllerNames)
-
-	type result struct {
-		controllerName string
-		offers         map[string]ApplicationOfferResult
-		err            error
-	}
-	results := make([]result, len(controllerNames))
-	var wg sync.WaitGroup
-	for i, controllerName := range controllerNames {
-		wg.Add(1)
-		go func(i int, controllerName string) {
-			defer wg.Done()
-			offers, err := c.findOnController(ctx, controllerName, loggedInUser, filter)
-			results[i] = result{controllerName: controllerName, offers: offers, err: err}
-		}(i, controllerName)
-	}
-	wg.Wait()
-
-	merged := make(map[string]ApplicationOfferResult)
-	for _, r := range results {
-		if r.err != nil {
-			fmt.Fprintf(ctx.GetStderr(), "could not search controller %q: %v\n", r.controllerName, r.err)
-			continue
-		}
-		for url, offer := range r.offers {
-			merged[url] = offer
-		}
-	}
-	return merged, nil
 }
 
 func (c *findCommand) validateOrSetURL() error {

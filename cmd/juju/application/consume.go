@@ -5,7 +5,6 @@ package application
 
 import (
 	"context"
-	"sort"
 
 	"github.com/juju/errors"
 	"github.com/juju/gnuflag"
@@ -16,6 +15,7 @@ import (
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/cmd"
 	"github.com/juju/juju/cmd/juju/block"
+	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
 	"github.com/juju/juju/core/crossmodel"
 	"github.com/juju/juju/rpc/params"
@@ -230,23 +230,10 @@ func (c *consumeCommand) candidateControllers() ([]string, error) {
 	}
 	// A test may have injected a source API — treat it as current-only
 	// regardless of the flag so existing single-controller tests are unaffected.
-	if c.sourceAPI != nil || !c.allControllers {
+	if c.sourceAPI != nil {
 		return []string{current}, nil
 	}
-
-	all, err := c.ClientStore().AllControllers()
-	if err != nil {
-		return nil, errors.Trace(err)
-	}
-
-	rest := make([]string, 0, len(all))
-	for name := range all {
-		if name != current {
-			rest = append(rest, name)
-		}
-	}
-	sort.Strings(rest)
-	return append([]string{current}, rest...), nil
+	return common.CandidateControllers(c.ClientStore(), current, c.allControllers)
 }
 
 // Run adds the requested remote offer to the model. Implements
