@@ -76,6 +76,11 @@ type UserInfo struct {
 	DateCreated    string `yaml:"date-created,omitempty" json:"date-created,omitempty"`
 	LastConnection string `yaml:"last-connection,omitempty" json:"last-connection,omitempty"`
 	Disabled       bool   `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+
+	// ControllerName is the name of the controller this user was listed
+	// from. It is only set in --all-controllers mode and omitted from
+	// serialization otherwise.
+	ControllerName string `yaml:"controller,omitempty" json:"controller,omitempty"`
 }
 
 // Info implements Command.Info.

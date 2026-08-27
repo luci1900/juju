@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,12 +16,15 @@ import (
 	"github.com/juju/gnuflag"
 	"github.com/juju/names/v6"
 
+	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
+	"github.com/juju/juju/api/client/modelmanager"
 	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/cmd"
 	"github.com/juju/juju/cmd/juju/common"
 	"github.com/juju/juju/cmd/modelcmd"
+	"github.com/juju/juju/cmd/modelcmd/fanout"
 	"github.com/juju/juju/core/life"
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/output"
@@ -52,14 +56,15 @@ type ModelsSysAPI interface {
 // current user can access on the current controller.
 type modelsCommand struct {
 	modelcmd.ControllerCommandBase
-	out          cmd.Output
-	all          bool
-	loggedInUser string
-	user         string
-	listUUID     bool
-	exactTime    bool
-	modelAPI     ModelManagerAPI
-	sysAPI       ModelsSysAPI
+	out            cmd.Output
+	all            bool
+	allControllers bool
+	loggedInUser   string
+	user           string
+	listUUID       bool
+	exactTime      bool
+	modelAPI       ModelManagerAPI
+	sysAPI         ModelsSysAPI
 
 	runVars modelsRunValues
 }
@@ -83,6 +88,7 @@ func (c *modelsCommand) SetFlags(f *gnuflag.FlagSet) {
 	c.ControllerCommandBase.SetFlags(f)
 	f.StringVar(&c.user, "user", "", "The user to list models for (administrative users only)")
 	f.BoolVar(&c.all, "all", false, "Lists all models, regardless of user accessibility (administrative users only)")
+	f.BoolVar(&c.allControllers, "all-controllers", false, "List models across all registered controllers")
 	f.BoolVar(&c.listUUID, "uuid", false, "Display UUID for models")
 	f.BoolVar(&c.exactTime, "exact-time", false, "Use full timestamps")
 	c.out.AddFlags(f, "tabular", map[string]cmd.Formatter{
@@ -118,20 +124,127 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 	// TODO(perrito666) 2016-05-02 lp:1558657
 	now := time.Now()
 
-	modelmanagerAPI, err := c.getModelManagerAPI(ctx)
-	if err != nil {
-		return errors.Trace(err)
+	// Decide which controllers to visit. The single-controller case is a
+	// fan-out over one controller; --all-controllers fans out over every
+	// registered controller. Both share the same worker and merge logic.
+	var controllerNames []string
+	if c.allControllers {
+		all, err := c.ClientStore().AllControllers()
+		if err != nil {
+			return errors.Trace(err)
+		}
+		for name := range all {
+			controllerNames = append(controllerNames, name)
+		}
+		sort.Strings(controllerNames)
+	} else {
+		controllerNames = []string{controllerName}
 	}
-	defer modelmanagerAPI.Close()
 
-	haveModels, err := c.getModelSummaries(ctx, modelmanagerAPI, now)
-	if err != nil {
+	store := c.ClientStore()
+	opener := func(ctx context.Context, name string) (api.Connection, error) {
+		// In the single-controller path the API may have been injected by
+		// tests; skip opening a real connection in that case.
+		if !c.allControllers && c.modelAPI != nil {
+			return nil, nil
+		}
+		return c.CommandBase.NewAPIRoot(ctx, store, name, "")
+	}
+
+	// user is either the explicit --user value or the empty string, in which
+	// case each worker resolves the per-controller account's user.
+	user := c.user
+	cmdCtx := ctx
+	worker := func(ctx context.Context, conn api.Connection, controllerName string, account jujuclient.AccountDetails) ([]ModelSummary, error) {
+		// In the single-controller path the API may have been injected by
+		// tests; use it directly. Otherwise build a client from the
+		// fan-out connection.
+		var api ModelManagerAPI
+		if !c.allControllers && c.modelAPI != nil {
+			api = c.modelAPI
+		} else {
+			api = modelmanager.NewClient(conn)
+			defer api.Close()
+		}
+		return c.getModelSummaries(ctx, cmdCtx, api, now, controllerName, user, account)
+	}
+
+	results := fanout.Run(ctx, store, opener, worker, controllerNames)
+
+	// In the single-controller path the API was injected by tests; close it
+	// now that the fan-out is done, matching the old defer behavior.
+	if !c.allControllers && c.modelAPI != nil {
+		_ = c.modelAPI.Close()
+	}
+
+	var allSummaries []ModelSummary
+	for _, r := range results {
+		if r.Err != nil {
+			if c.allControllers {
+				fmt.Fprintf(ctx.GetStderr(), "could not list models on controller %q: %v\n", r.ControllerName, r.Err)
+				continue
+			}
+			// Single-controller: propagate the error directly, matching
+			// the pre-fanout behavior.
+			return errors.Trace(r.Err)
+		}
+		allSummaries = append(allSummaries, r.Data...)
+	}
+
+	// Single-controller path: Cache models in the client store and mark the
+	// current model so the tabular formatter can highlight it.
+	if !c.allControllers && len(allSummaries) > 0 {
+		modelsToStore := map[string]jujuclient.ModelDetails{}
+		for _, m := range allSummaries {
+			modelsToStore[m.Name] = jujuclient.ModelDetails{ModelUUID: m.UUID, ModelType: m.Type}
+		}
+		if err := c.ClientStore().SetModels(c.runVars.controllerName, modelsToStore); err != nil {
+			return errors.Trace(err)
+		}
+	}
+
+	// Compute count flags from the collected summaries.
+	c.runVars.hasMachinesCount = false
+	c.runVars.hasCoresCount = false
+	c.runVars.hasUnitsCount = false
+	for _, m := range allSummaries {
+		if _, ok := m.Counts[string(params.Machines)]; ok {
+			c.runVars.hasMachinesCount = true
+		}
+		if _, ok := m.Counts[string(params.Cores)]; ok {
+			c.runVars.hasCoresCount = true
+		}
+		if _, ok := m.Counts[string(params.Units)]; ok {
+			c.runVars.hasUnitsCount = true
+		}
+	}
+
+	// Sort by controller then model name for deterministic output.
+	sort.Slice(allSummaries, func(i, j int) bool {
+		if allSummaries[i].ControllerName != allSummaries[j].ControllerName {
+			return allSummaries[i].ControllerName < allSummaries[j].ControllerName
+		}
+		return allSummaries[i].Name < allSummaries[j].Name
+	})
+
+	// In single-controller mode, mark the current model.
+	modelSummarySet := ModelSummarySet{Models: allSummaries}
+	if !c.allControllers {
+		modelSummarySet.CurrentModelQualified, modelSummarySet.CurrentModel = c.currentModelName()
+	}
+
+	// For yaml/json in multi-controller mode, group by controller.
+	if c.allControllers && (c.out.Name() == "yaml" || c.out.Name() == "json") {
+		grouped := make(map[string][]ModelSummary)
+		for _, m := range allSummaries {
+			grouped[m.ControllerName] = append(grouped[m.ControllerName], m)
+		}
+		return c.out.Write(ctx, grouped)
+	}
+	if err := c.out.Write(ctx, modelSummarySet); err != nil {
 		return err
 	}
-	if !haveModels && c.out.Name() == "tabular" {
-		// When the output is tabular, we inform the user when there
-		// are no models available, and tell them how to go about
-		// creating or granting access to them.
+	if len(allSummaries) == 0 && c.out.Name() == "tabular" {
 		fmt.Fprintln(ctx.Stderr, noModelsMessage)
 	}
 	return nil
@@ -156,44 +269,45 @@ func (c *modelsCommand) getModelManagerAPI(ctx context.Context) (ModelManagerAPI
 	return c.NewModelManagerAPIClient(ctx)
 }
 
-func (c *modelsCommand) getModelSummaries(ctx *cmd.Context, client ModelManagerAPI, now time.Time) (bool, error) {
-	results, err := client.ListModelSummaries(ctx, c.user, c.all)
+// getModelSummaries fetches model summaries for the given user from the
+// given API and converts them to ModelSummary values scoped to
+// controllerName. Per-model errors are downgraded to log messages, mirroring
+// the single-controller behavior.
+func (c *modelsCommand) getModelSummaries(
+	ctx context.Context,
+	cmdCtx *cmd.Context,
+	api ModelManagerAPI,
+	now time.Time,
+	controllerName string,
+	user string,
+	account jujuclient.AccountDetails,
+) ([]ModelSummary, error) {
+	listUser := user
+	if listUser == "" {
+		listUser = account.User
+	}
+	if !names.IsValidUser(listUser) {
+		return nil, errors.NotValidf("user %q", listUser)
+	}
+	summaries, err := api.ListModelSummaries(ctx, listUser, c.all)
 	if err != nil {
-		return false, errors.Trace(err)
+		return nil, errors.Trace(err)
 	}
-	summaries := []ModelSummary{}
-	modelsToStore := map[string]jujuclient.ModelDetails{}
-	for _, result := range results {
-		// Since we do not want to throw away all results if we have an
-		// an issue with a model, we will display errors in Stderr
-		// and will continue processing the rest.
+	out := make([]ModelSummary, 0, len(summaries))
+	for _, result := range summaries {
 		if result.Error != nil {
-			ctx.Infof("%s", result.Error.Error())
+			cmdCtx.Infof("%s", result.Error.Error())
 			continue
 		}
-		model, err := c.modelSummaryFromParams(result, now)
+		summary, err := c.modelSummaryFromParams(result, now)
 		if err != nil {
-			ctx.Infof("%s", err.Error())
+			cmdCtx.Infof("%s", err.Error())
 			continue
 		}
-		model.ControllerName = c.runVars.controllerName
-		summaries = append(summaries, model)
-		modelsToStore[model.Name] = jujuclient.ModelDetails{ModelUUID: model.UUID, ModelType: model.Type}
+		summary.ControllerName = controllerName
+		out = append(out, summary)
 	}
-	found := len(summaries) > 0
-
-	if err := c.ClientStore().SetModels(c.runVars.controllerName, modelsToStore); err != nil {
-		return found, errors.Trace(err)
-	}
-
-	// Identifying current model has to be done after models in client store have been updated
-	// since that call determines/updates current model information.
-	modelSummarySet := ModelSummarySet{Models: summaries}
-	modelSummarySet.CurrentModelQualified, modelSummarySet.CurrentModel = c.currentModelName()
-	if err := c.out.Write(ctx, modelSummarySet); err != nil {
-		return found, err
-	}
-	return found, err
+	return out, nil
 }
 
 // ModelSummarySet contains the set of summaries for models.
@@ -306,27 +420,6 @@ func (c *modelsCommand) modelSummaryFromParams(apiSummary base.UserModelSummary,
 	for _, v := range apiSummary.Counts {
 		summary.Counts[v.Entity] = v.Count
 	}
-
-	// If hasMachinesCounts is not yet set, check if we should set it based on this model summary.
-	if !c.runVars.hasMachinesCount {
-		if _, ok := summary.Counts[string(params.Machines)]; ok {
-			c.runVars.hasMachinesCount = true
-		}
-	}
-
-	// If hasCoresCounts is not yet set, check if we should set it based on this model summary.
-	if !c.runVars.hasCoresCount {
-		if _, ok := summary.Counts[string(params.Cores)]; ok {
-			c.runVars.hasCoresCount = true
-		}
-	}
-
-	// If hasUnitsCounts is not yet set, check if we should set it based on this model summary.
-	if !c.runVars.hasUnitsCount {
-		if _, ok := summary.Counts[string(params.Units)]; ok {
-			c.runVars.hasUnitsCount = true
-		}
-	}
 	return summary, nil
 }
 
@@ -362,7 +455,40 @@ func (c *modelsCommand) formatTabular(writer io.Writer, value any) error {
 	if !ok {
 		return errors.Errorf("expected value of type ModelSummarySet, got %T", value)
 	}
+	if c.allControllers {
+		return c.tabularSummariesGroupedByController(writer, summariesSet)
+	}
 	return c.tabularSummaries(writer, summariesSet)
+}
+
+// tabularSummariesGroupedByController renders one section per controller in
+// multi-controller mode. Each section has its own header, matching the
+// single-controller layout, so the output reads as a concatenation of
+// per-controller `juju models` runs.
+func (c *modelsCommand) tabularSummariesGroupedByController(writer io.Writer, modelSet ModelSummarySet) error {
+	// Group summaries by controller, preserving the already-sorted order.
+	groups := make(map[string][]ModelSummary)
+	var controllerNames []string
+	for _, m := range modelSet.Models {
+		if _, ok := groups[m.ControllerName]; !ok {
+			controllerNames = append(controllerNames, m.ControllerName)
+		}
+		groups[m.ControllerName] = append(groups[m.ControllerName], m)
+	}
+	sort.Strings(controllerNames)
+
+	first := true
+	for _, controllerName := range controllerNames {
+		if !first {
+			fmt.Fprintln(writer)
+		}
+		first = false
+		c.runVars.controllerName = controllerName
+		if err := c.tabularSummaries(writer, ModelSummarySet{Models: groups[controllerName]}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *modelsCommand) tabularColumns(tw *ansiterm.TabWriter, w output.Wrapper) {

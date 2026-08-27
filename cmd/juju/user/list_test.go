@@ -172,9 +172,9 @@ func (s *UserListCommandSuite) TestUserInfoFormatJson(c *tc.C) {
 	context, err := cmdtesting.RunCommand(c, s.newUserListCommand(), "--format", "json")
 	c.Assert(err, tc.ErrorIsNil)
 	c.Assert(cmdtesting.Stdout(context), tc.Equals, "["+
-		`{"user-name":"adam","display-name":"Adam Zulu","access":"login","date-created":"2012-10-08","last-connection":"2014-01-01"},`+
-		`{"user-name":"barbara","display-name":"Barbara Yellow","access":"add-model","date-created":"2013-05-02","last-connection":"just now"},`+
-		`{"user-name":"charlie","display-name":"Charlie Xavier","access":"superuser","date-created":"6 hours ago","last-connection":"never connected"}`+
+		`{"user-name":"adam","display-name":"Adam Zulu","access":"login","date-created":"2012-10-08","last-connection":"2014-01-01","controller":"testing"},`+
+		`{"user-name":"barbara","display-name":"Barbara Yellow","access":"add-model","date-created":"2013-05-02","last-connection":"just now","controller":"testing"},`+
+		`{"user-name":"charlie","display-name":"Charlie Xavier","access":"superuser","date-created":"6 hours ago","last-connection":"never connected","controller":"testing"}`+
 		"]\n")
 }
 
@@ -187,16 +187,19 @@ func (s *UserListCommandSuite) TestUserInfoFormatYaml(c *tc.C) {
   access: login
   date-created: "2012-10-08"
   last-connection: "2014-01-01"
+  controller: testing
 - user-name: barbara
   display-name: Barbara Yellow
   access: add-model
   date-created: "2013-05-02"
   last-connection: just now
+  controller: testing
 - user-name: charlie
   display-name: Charlie Xavier
   access: superuser
   date-created: 6 hours ago
   last-connection: never connected
+  controller: testing
 `[1:])
 }
 
