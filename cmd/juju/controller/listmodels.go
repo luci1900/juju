@@ -102,6 +102,17 @@ func (c *modelsCommand) SetFlags(f *gnuflag.FlagSet) {
 	})
 }
 
+// Init implements Command.Init.
+func (c *modelsCommand) Init(args []string) error {
+	if err := cmd.CheckEmpty(args); err != nil {
+		return err
+	}
+	if c.allControllers && c.ExplicitControllerName() != "" {
+		return errors.New("--all-controllers cannot be used with -c/--controller")
+	}
+	return nil
+}
+
 // Run implements Command.Run
 func (c *modelsCommand) Run(ctx *cmd.Context) error {
 	controllerName, err := c.ControllerName()

@@ -350,6 +350,16 @@ func (s *UserListCommandSuite) TestAllControllersAllFail(c *tc.C) {
 	c.Assert(err, tc.ErrorMatches, "could not list users on any controller")
 }
 
+func (s *UserListCommandSuite) TestAllControllersConflictsWithControllerFlag(c *tc.C) {
+	_, err := cmdtesting.RunCommand(c, s.newUserListCommand(), "--all-controllers", "-c", "testing")
+	c.Assert(err, tc.ErrorMatches, "--all-controllers cannot be used with -c/--controller")
+}
+
+func (s *UserListCommandSuite) TestAllControllersConflictsWithModelName(c *tc.C) {
+	_, err := cmdtesting.RunCommand(c, s.newUserListCommand(), "--all-controllers", "test")
+	c.Assert(err, tc.ErrorMatches, "--all-controllers cannot be used with a model name")
+}
+
 func (s *UserListCommandSuite) TestModelUsers(c *tc.C) {
 	context, err := cmdtesting.RunCommand(c, s.newUserListCommand(), "test")
 	c.Assert(err, tc.ErrorIsNil)

@@ -120,6 +120,14 @@ func (c *listCommand) SetFlags(f *gnuflag.FlagSet) {
 
 // Init implements Command.Init.
 func (c *listCommand) Init(args []string) (err error) {
+	if c.allControllers {
+		if c.ExplicitControllerName() != "" {
+			return errors.New("--all-controllers cannot be used with -c/--controller")
+		}
+		if len(args) > 0 {
+			return errors.New("--all-controllers cannot be used with a model name")
+		}
+	}
 	c.modelName, err = cmd.ZeroOrOneArgs(args)
 	if err != nil {
 		return err

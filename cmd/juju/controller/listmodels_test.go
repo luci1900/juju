@@ -343,6 +343,11 @@ func (s *ModelsSuite) TestModelsMachineInfo(c *tc.C) {
 	s.checkAPICalls(c, "ListModelSummaries", "Close")
 }
 
+func (s *ModelsSuite) TestAllControllersConflictsWithControllerFlag(c *tc.C) {
+	_, err := cmdtesting.RunCommand(c, s.newCommand(), "--all-controllers", "-c", "fake")
+	c.Assert(err, tc.ErrorMatches, "--all-controllers cannot be used with -c/--controller")
+}
+
 func (s *ModelsSuite) TestUnrecognizedArg(c *tc.C) {
 	context, err := cmdtesting.RunCommand(c, s.newCommand(), "whoops")
 	c.Assert(err, tc.ErrorMatches, `unrecognized args: \["whoops"\]`)

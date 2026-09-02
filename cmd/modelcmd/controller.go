@@ -199,6 +199,14 @@ func (c *ControllerCommandBase) SetControllerName(controllerName string, allowDe
 	return nil
 }
 
+// ExplicitControllerName returns the controller name passed explicitly
+// via the -c/--controller flag, or the empty string if the flag was not
+// given. Unlike ControllerName it never resolves the current controller,
+// so it can be used to detect a flag conflict before Run.
+func (c *ControllerCommandBase) ExplicitControllerName() string {
+	return c._controllerName
+}
+
 // ControllerName implements the ControllerCommand interface.
 func (c *ControllerCommandBase) ControllerName() (string, error) {
 	c.assertRunStarted()
