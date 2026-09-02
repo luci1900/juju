@@ -18,6 +18,7 @@ import (
 	"github.com/juju/juju/cmd/cmd"
 	"github.com/juju/juju/cmd/cmd/cmdtesting"
 	"github.com/juju/juju/cmd/juju/user"
+	jutesting "github.com/juju/juju/internal/testing"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -43,6 +44,23 @@ type fakeUserListAPI struct {
 
 func (*fakeUserListAPI) Close() error {
 	return nil
+}
+
+// failingUserListAPI is a UserInfo API that always fails.
+type failingUserListAPI struct {
+	err error
+}
+
+func (*failingUserListAPI) Close() error {
+	return nil
+}
+
+func (f *failingUserListAPI) ModelUserInfo(ctx context.Context, modelUUID string) ([]params.ModelUserInfo, error) {
+	return nil, f.err
+}
+
+func (f *failingUserListAPI) UserInfo(ctx context.Context, usernames []string, all usermanager.IncludeDisabled) ([]params.UserInfo, error) {
+	return nil, f.err
 }
 
 type fakeClock struct {
@@ -172,9 +190,9 @@ func (s *UserListCommandSuite) TestUserInfoFormatJson(c *tc.C) {
 	context, err := cmdtesting.RunCommand(c, s.newUserListCommand(), "--format", "json")
 	c.Assert(err, tc.ErrorIsNil)
 	c.Assert(cmdtesting.Stdout(context), tc.Equals, "["+
-		`{"user-name":"adam","display-name":"Adam Zulu","access":"login","date-created":"2012-10-08","last-connection":"2014-01-01","controller":"testing"},`+
-		`{"user-name":"barbara","display-name":"Barbara Yellow","access":"add-model","date-created":"2013-05-02","last-connection":"just now","controller":"testing"},`+
-		`{"user-name":"charlie","display-name":"Charlie Xavier","access":"superuser","date-created":"6 hours ago","last-connection":"never connected","controller":"testing"}`+
+		`{"user-name":"adam","display-name":"Adam Zulu","access":"login","date-created":"2012-10-08","last-connection":"2014-01-01"},`+
+		`{"user-name":"barbara","display-name":"Barbara Yellow","access":"add-model","date-created":"2013-05-02","last-connection":"just now"},`+
+		`{"user-name":"charlie","display-name":"Charlie Xavier","access":"superuser","date-created":"6 hours ago","last-connection":"never connected"}`+
 		"]\n")
 }
 
@@ -187,20 +205,149 @@ func (s *UserListCommandSuite) TestUserInfoFormatYaml(c *tc.C) {
   access: login
   date-created: "2012-10-08"
   last-connection: "2014-01-01"
-  controller: testing
 - user-name: barbara
   display-name: Barbara Yellow
   access: add-model
   date-created: "2013-05-02"
   last-connection: just now
-  controller: testing
 - user-name: charlie
   display-name: Charlie Xavier
   access: superuser
   date-created: 6 hours ago
   last-connection: never connected
-  controller: testing
 `[1:])
+}
+
+func (s *UserListCommandSuite) TestAllControllersTabular(c *tc.C) {
+	// Two controllers, each with its own set of users; the tabular
+	// output groups by controller.
+	s.store.Controllers["another"] = jujuclient.ControllerDetails{
+		APIEndpoints:   []string{"0.1.2.3:12345"},
+		CACert:         jutesting.CACert,
+		ControllerUUID: jutesting.ControllerTag.Id(),
+	}
+	s.store.Accounts["another"] = jujuclient.AccountDetails{
+		User:     "adam",
+		Password: "password",
+	}
+
+	apiA := &fakeUserListAPI{clock: &fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)}}
+	apiB := &fakeUserListAPI{clock: &fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)}}
+	cmd := user.NewListCommandForTestWithControllers(
+		map[string]user.UserInfoAPI{"testing": apiA, "another": apiB},
+		s.store,
+		&fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)},
+	)
+
+	context, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(context), tc.Equals, `
+Controller: another
+
+Name     Display name    Access     Date created  Last connection
+adam*    Adam Zulu       login      2012-10-08    2014-01-01
+barbara  Barbara Yellow  add-model  2013-05-02    just now
+charlie  Charlie Xavier  superuser  6 hours ago   never connected
+
+Controller: testing
+
+Name     Display name    Access     Date created  Last connection
+adam*    Adam Zulu       login      2012-10-08    2014-01-01
+barbara  Barbara Yellow  add-model  2013-05-02    just now
+charlie  Charlie Xavier  superuser  6 hours ago   never connected
+`[1:])
+	c.Assert(cmdtesting.Stderr(context), tc.Equals, "")
+}
+
+func (s *UserListCommandSuite) TestAllControllersJsonIncludesController(c *tc.C) {
+	s.store.Controllers["another"] = jujuclient.ControllerDetails{
+		APIEndpoints:   []string{"0.1.2.3:12345"},
+		CACert:         jutesting.CACert,
+		ControllerUUID: jutesting.ControllerTag.Id(),
+	}
+	s.store.Accounts["another"] = jujuclient.AccountDetails{
+		User:     "adam",
+		Password: "password",
+	}
+
+	apiA := &fakeUserListAPI{clock: &fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)}}
+	apiB := &fakeUserListAPI{clock: &fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)}}
+	cmd := user.NewListCommandForTestWithControllers(
+		map[string]user.UserInfoAPI{"testing": apiA, "another": apiB},
+		s.store,
+		&fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)},
+	)
+
+	context, err := cmdtesting.RunCommand(c, cmd, "--all-controllers", "--format", "json")
+	c.Assert(err, tc.ErrorIsNil)
+	// Each user entry carries the controller it came from.
+	c.Assert(cmdtesting.Stdout(context), tc.Equals, "["+
+		`{"user-name":"adam","display-name":"Adam Zulu","access":"login","date-created":"2012-10-08","last-connection":"2014-01-01","controller":"another"},`+
+		`{"user-name":"barbara","display-name":"Barbara Yellow","access":"add-model","date-created":"2013-05-02","last-connection":"just now","controller":"another"},`+
+		`{"user-name":"charlie","display-name":"Charlie Xavier","access":"superuser","date-created":"6 hours ago","last-connection":"never connected","controller":"another"},`+
+		`{"user-name":"adam","display-name":"Adam Zulu","access":"login","date-created":"2012-10-08","last-connection":"2014-01-01","controller":"testing"},`+
+		`{"user-name":"barbara","display-name":"Barbara Yellow","access":"add-model","date-created":"2013-05-02","last-connection":"just now","controller":"testing"},`+
+		`{"user-name":"charlie","display-name":"Charlie Xavier","access":"superuser","date-created":"6 hours ago","last-connection":"never connected","controller":"testing"}`+
+		"]\n")
+}
+
+func (s *UserListCommandSuite) TestAllControllersPartialFailure(c *tc.C) {
+	// One controller fails; the other's users are still listed and the
+	// failure is warned about on stderr, with a zero exit code.
+	s.store.Controllers["another"] = jujuclient.ControllerDetails{
+		APIEndpoints:   []string{"0.1.2.3:12345"},
+		CACert:         jutesting.CACert,
+		ControllerUUID: jutesting.ControllerTag.Id(),
+	}
+	s.store.Accounts["another"] = jujuclient.AccountDetails{
+		User:     "adam",
+		Password: "password",
+	}
+
+	apiA := &fakeUserListAPI{clock: &fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)}}
+	apiB := &failingUserListAPI{err: errors.New("connection refused")}
+	cmd := user.NewListCommandForTestWithControllers(
+		map[string]user.UserInfoAPI{"testing": apiA, "another": apiB},
+		s.store,
+		&fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)},
+	)
+
+	context, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(cmdtesting.Stdout(context), tc.Equals, `
+Controller: testing
+
+Name     Display name    Access     Date created  Last connection
+adam*    Adam Zulu       login      2012-10-08    2014-01-01
+barbara  Barbara Yellow  add-model  2013-05-02    just now
+charlie  Charlie Xavier  superuser  6 hours ago   never connected
+`[1:])
+	c.Assert(cmdtesting.Stderr(context), tc.Equals,
+		`could not list users on controller "another": connection refused`+"\n")
+}
+
+func (s *UserListCommandSuite) TestAllControllersAllFail(c *tc.C) {
+	// Every controller fails; the command exits non-zero.
+	s.store.Controllers["another"] = jujuclient.ControllerDetails{
+		APIEndpoints:   []string{"0.1.2.3:12345"},
+		CACert:         jutesting.CACert,
+		ControllerUUID: jutesting.ControllerTag.Id(),
+	}
+	s.store.Accounts["another"] = jujuclient.AccountDetails{
+		User:     "adam",
+		Password: "password",
+	}
+
+	apiA := &failingUserListAPI{err: errors.New("connection refused")}
+	apiB := &failingUserListAPI{err: errors.New("connection refused")}
+	cmd := user.NewListCommandForTestWithControllers(
+		map[string]user.UserInfoAPI{"testing": apiA, "another": apiB},
+		s.store,
+		&fakeClock{now: time.Date(2016, 9, 15, 12, 0, 0, 0, time.UTC)},
+	)
+
+	_, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorMatches, "could not list users on any controller")
 }
 
 func (s *UserListCommandSuite) TestModelUsers(c *tc.C) {

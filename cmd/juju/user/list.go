@@ -16,9 +16,7 @@ import (
 	"github.com/juju/gnuflag"
 	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/client/usermanager"
-	"github.com/juju/juju/api/jujuclient"
 	jujucmd "github.com/juju/juju/cmd"
 	"github.com/juju/juju/cmd/cmd"
 	"github.com/juju/juju/cmd/juju/common"
@@ -68,6 +66,11 @@ type listCommand struct {
 	allControllers bool
 	modelName      string
 	currentUser    string
+
+	// controllerAPIs optionally maps controller names to injected
+	// clients, for tests. When set, setup uses these instead of opening
+	// connections, for both single- and multi-controller runs.
+	controllerAPIs map[string]UserInfoAPI
 }
 
 // ModelUsersAPI defines the methods on the client API that the
@@ -172,9 +175,9 @@ func (c *listCommand) controllerUsers(ctx *cmd.Context) error {
 		return errors.Trace(err)
 	}
 
-	// Decide which controllers to visit. The single-controller case is a
-	// fan-out over one controller; --all-controllers fans out over every
-	// registered controller. Both share the same worker and merge logic.
+	// The single-controller case is a fan-out over one controller;
+	// --all-controllers fans out over every registered controller. Both
+	// share the same setup, worker and merge logic.
 	var controllerNames []string
 	if c.allControllers {
 		all, err := c.ClientStore().AllControllers()
@@ -189,27 +192,41 @@ func (c *listCommand) controllerUsers(ctx *cmd.Context) error {
 		controllerNames = []string{controllerName}
 	}
 
-	store := c.ClientStore()
-	opener := func(ctx context.Context, name string) (api.Connection, error) {
-		// In the single-controller path the API may have been injected by
-		// tests; skip opening a real connection in that case.
-		if !c.allControllers && c.api != nil {
-			return nil, nil
+	// Setup runs sequentially on this goroutine: opening connections may
+	// prompt for credentials and touches unsynchronized CommandBase state,
+	// so it must not run concurrently.
+	setup := func(ctx context.Context, name string) (fanout.Session, error) {
+		account, err := c.ClientStore().AccountDetails(name)
+		if err != nil {
+			return fanout.Session{}, errors.Trace(err)
 		}
-		return c.CommandBase.NewAPIRoot(ctx, store, name, "")
+		// A test may have injected clients; use them instead of opening
+		// connections.
+		if _, ok := c.controllerAPIs[name]; ok {
+			return fanout.Session{Account: *account}, nil
+		}
+		if !c.allControllers && c.api != nil {
+			return fanout.Session{Account: *account}, nil
+		}
+		conn, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), name, "")
+		if err != nil {
+			return fanout.Session{}, errors.Trace(err)
+		}
+		return fanout.Session{Conn: conn, Account: *account}, nil
 	}
 
 	disabled := usermanager.IncludeDisabled(c.All)
-	worker := func(ctx context.Context, conn api.Connection, controllerName string, account jujuclient.AccountDetails) ([]UserInfo, error) {
-		// In the single-controller path the API may have been injected by
-		// tests; use it directly. Otherwise build a client from the
-		// fan-out connection.
+	worker := func(ctx context.Context, session fanout.Session, controllerName string) ([]UserInfo, error) {
+		// A nil Conn means setup substituted a test-injected client.
 		var client UserInfoAPI
-		if !c.allControllers && c.api != nil {
-			client = c.api
+		if session.Conn == nil {
+			if api, ok := c.controllerAPIs[controllerName]; ok {
+				client = api
+			} else {
+				client = c.api
+			}
 		} else {
-			client = usermanager.NewClient(conn)
-			defer client.Close()
+			client = usermanager.NewClient(session.Conn)
 		}
 		result, err := client.UserInfo(ctx, nil, disabled)
 		if err != nil {
@@ -217,17 +234,24 @@ func (c *listCommand) controllerUsers(ctx *cmd.Context) error {
 		}
 		users := c.apiUsersToUserInfoSlice(result)
 		for i := range users {
-			users[i].ControllerName = controllerName
+			// ControllerName is only serialized in --all-controllers
+			// mode; see UserInfo.ControllerName.
+			if c.allControllers {
+				users[i].ControllerName = controllerName
+			}
 		}
 		return users, nil
 	}
 
-	results := fanout.Run(ctx, store, opener, worker, controllerNames)
+	results := fanout.Run(ctx, setup, worker, controllerNames)
 
-	// In the single-controller path the API was injected by tests; close it
-	// now that the fan-out is done, matching the old defer behavior.
+	// A test-injected client is not owned by the fan-out; close it now
+	// that the fan-out is done, matching the pre-fanout defer behavior.
 	if !c.allControllers && c.api != nil {
 		_ = c.api.Close()
+	}
+	for _, api := range c.controllerAPIs {
+		_ = api.Close()
 	}
 
 	var allUsers []UserInfo
@@ -242,6 +266,12 @@ func (c *listCommand) controllerUsers(ctx *cmd.Context) error {
 			return errors.Trace(r.Err)
 		}
 		allUsers = append(allUsers, r.Data...)
+	}
+
+	// A fan-out where no controller returned anything is a failure, even
+	// though individual controller errors were only warned about above.
+	if c.allControllers && fanout.AllFailed(results) {
+		return errors.New("could not list users on any controller")
 	}
 
 	if len(allUsers) == 0 {

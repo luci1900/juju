@@ -1,16 +1,22 @@
 // Copyright 2026 Canonical Ltd.
 // Licensed under the AGPLv3, see LICENCE file for details.
 
-// Package fanout provides a reusable, thread-safe helper for running a
-// read-only query concurrently across every controller registered in a
+// Package fanout provides a reusable helper for running a read-only query
+// concurrently across every controller registered in a
 // jujuclient.ClientStore.
 //
 // The helper resolves account credentials per controller (a user may hold
-// different identities on different controllers) and opens an isolated
-// api.Connection per worker through an injected Opener, so callers do not
-// race on shared CommandBase connection caches.
+// different identities on different controllers) and hands each worker an
+// isolated Session, so callers do not race on shared CommandBase connection
+// caches.
 //
-// Failure handling is fail-soft: a controller that fails to connect or query
+// Setup runs sequentially on the calling goroutine before any worker starts.
+// This keeps connection establishment - which may prompt for credentials
+// or touch unsynchronized command state such as CommandBase's API context
+// cache - free of data races and interleaved prompts. Only the query phase
+// fans out concurrently.
+//
+// Failure handling is fail-soft: a controller that fails to set up or query
 // is recorded as an error on its Result and does not abort the rest of the
 // fan-out. Callers are responsible for downgrading per-controller errors to
 // stderr warnings and for deciding the exit code based on whether any
@@ -26,27 +32,37 @@ import (
 	"github.com/juju/juju/api/jujuclient"
 )
 
-// Opener returns an API connection for the named controller.
-//
-// The connection is owned by the helper: Run closes every connection it
-// opened, including ones for which the worker returned an error. Opener
-// MUST NOT touch any unsynchronized connection cache shared across
-// goroutines; it should open a fresh connection per call.
-type Opener func(ctx context.Context, controllerName string) (api.Connection, error)
+// Session holds the per-controller connection and account resolved during
+// the sequential setup phase and handed to the worker.
+type Session struct {
+	// Conn is the API connection for the controller. It may be nil when
+	// the SetupFunc substitutes a non-connection client (e.g. in tests);
+	// Run only closes non-nil connections.
+	Conn api.Connection
 
-// WorkerFunc is the per-controller worker. The helper resolves the
-// controller's AccountDetails and opens a connection before invoking worker,
-// so worker receives the connection and account that belong to this
-// controller only.
+	// Account is the resolved account for the controller.
+	Account jujuclient.AccountDetails
+}
+
+// SetupFunc prepares a Session for the named controller. It is called
+// sequentially on the calling goroutine, once per controller, before any
+// worker runs, so it may safely prompt for credentials or touch
+// unsynchronized command state. A returned error fails only that
+// controller.
+type SetupFunc func(ctx context.Context, controllerName string) (Session, error)
+
+// WorkerFunc is the per-controller worker. It receives the Session built
+// during setup and must be safe for concurrent use: it runs on its own
+// goroutine for each controller. The worker does not own the connection;
+// Run closes it after the worker returns.
 type WorkerFunc[T any] func(
 	ctx context.Context,
-	conn api.Connection,
+	session Session,
 	controllerName string,
-	account jujuclient.AccountDetails,
 ) (T, error)
 
 // Result holds the outcome of a single controller's worker invocation.
-// ControllerName is always populated. Err is non-nil if the opener or the
+// ControllerName is always populated. Err is non-nil if setup or the
 // worker failed for this controller.
 type Result[T any] struct {
 	// ControllerName is the name of the controller this result is for.
@@ -56,57 +72,80 @@ type Result[T any] struct {
 	// the zero value of T when Err is non-nil.
 	Data T
 
-	// Err is the error from opening the connection or running the worker.
+	// Err is the error from setting up or running the worker.
 	Err error
 }
 
-// Run fans worker out concurrently across the named controllers. The caller
-// decides which controllers to visit; RunAll visits every controller
-// registered in store. Controllers are visited in the order given, but the
+// Run fans worker out concurrently across the named controllers. The
 // returned slice is in the same order as controllerNames so callers can
-// render output deterministically regardless of which worker finished first.
+// render output deterministically regardless of which worker finished
+// first.
 //
-// For each controller the helper:
-//  1. resolves AccountDetails(controllerName); a missing account is a
-//     per-controller error (the controller is skipped, not a fatal abort),
-//  2. opens an api.Connection via opener,
-//  3. invokes worker with the connection, controller name, and account,
-//  4. closes the connection.
+// For each controller, in order and on the calling goroutine, Run first
+// invokes setup. Controllers whose setup fails are recorded as an error
+// Result and skipped; setup for the remaining controllers still runs. Once
+// all setups are done, the workers for the successfully set-up controllers
+// run concurrently, each on its own goroutine, and each connection is
+// closed when its worker returns.
 //
-// The context passed to opener and worker is the same ctx passed to Run; a
+// The context passed to setup and worker is the same ctx passed to Run; a
 // cancelled context will cause in-flight workers to observe cancellation
-// according to the opener and worker's context handling.
+// according to the setup and worker's context handling.
 func Run[T any](
 	ctx context.Context,
-	store jujuclient.ClientStore,
-	opener Opener,
+	setup SetupFunc,
 	worker WorkerFunc[T],
 	controllerNames []string,
 ) []Result[T] {
 	results := make([]Result[T], len(controllerNames))
-	if len(controllerNames) == 0 {
-		return results
-	}
-	var wg sync.WaitGroup
 	for i, name := range controllerNames {
+		results[i].ControllerName = name
+	}
+	sessions := make([]Session, len(controllerNames))
+	for i, name := range controllerNames {
+		session, err := setup(ctx, name)
+		if err != nil {
+			var zero T
+			results[i].Data = zero
+			results[i].Err = err
+			continue
+		}
+		sessions[i] = session
+	}
+
+	var wg sync.WaitGroup
+	for i := range controllerNames {
+		if results[i].Err != nil {
+			continue
+		}
 		wg.Add(1)
-		go func(i int, controllerName string) {
+		go func(i int) {
 			defer wg.Done()
-			results[i] = runOne(ctx, store, opener, worker, controllerName)
-		}(i, name)
+			data, err := worker(ctx, sessions[i], controllerNames[i])
+			results[i].Data = data
+			results[i].Err = err
+		}(i)
 	}
 	wg.Wait()
+
+	// Close every connection that was opened, including those whose
+	// worker failed.
+	for i := range results {
+		if sessions[i].Conn != nil {
+			_ = sessions[i].Conn.Close()
+		}
+	}
 	return results
 }
 
-// RunAll fans worker out concurrently across every controller registered in
-// store, in sorted, deterministic order. It is a convenience wrapper around
-// Run for the common case. If AllControllers fails, the error is surfaced as
-// a single Result with an empty controller name.
+// RunAll fans worker out concurrently across every controller registered
+// in store, in sorted, deterministic order. If enumerating the
+// controllers fails, the error is surfaced as a single Result with an
+// empty controller name.
 func RunAll[T any](
 	ctx context.Context,
 	store jujuclient.ClientStore,
-	opener Opener,
+	setup SetupFunc,
 	worker WorkerFunc[T],
 ) []Result[T] {
 	controllers, err := store.AllControllers()
@@ -119,40 +158,17 @@ func RunAll[T any](
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	return Run(ctx, store, opener, worker, names)
+	return Run(ctx, setup, worker, names)
 }
 
-// runOne is the per-controller worker. It is safe to call concurrently
-// because it reads only per-controller store entries and uses the injected
-// opener, which the caller guarantees does not touch shared unsynchronized
-// state.
-func runOne[T any](
-	ctx context.Context,
-	store jujuclient.ClientStore,
-	opener Opener,
-	worker WorkerFunc[T],
-	controllerName string,
-) Result[T] {
-	var zero T
-	res := Result[T]{ControllerName: controllerName, Data: zero}
-
-	account, err := store.AccountDetails(controllerName)
-	if err != nil {
-		res.Err = err
-		return res
+// AllFailed reports whether every result carries an error. Callers can
+// use it to decide the exit code: a fan-out where no controller returned
+// data should not exit zero.
+func AllFailed[T any](results []Result[T]) bool {
+	for _, r := range results {
+		if r.Err == nil {
+			return false
+		}
 	}
-
-	conn, err := opener(ctx, controllerName)
-	if err != nil {
-		res.Err = err
-		return res
-	}
-	if conn != nil {
-		defer func() { _ = conn.Close() }()
-	}
-
-	data, err := worker(ctx, conn, controllerName, *account)
-	res.Data = data
-	res.Err = err
-	return res
+	return len(results) > 0
 }

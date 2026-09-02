@@ -16,6 +16,7 @@ juju users [options] [model-name]
 | Flag | Default | Usage |
 | --- | --- | --- |
 | `--all` | false | Include disabled users (on controller only) |
+| `--all-controllers` | false | List users across all registered controllers |
 | `-c`, `--controller` |  | Controller to operate in |
 | `--exact-time` | false | Use full timestamp for connection times |
 | `--format` | tabular | Specify output format (json&#x7c;tabular&#x7c;yaml) |
@@ -30,6 +31,10 @@ Print the users relevant to the current controller:
 Print the users relevant to the controller "another":
 
     juju users -c another
+
+Print the users relevant to all registered controllers:
+
+    juju users --all-controllers
 
 Print the users relevant to the model "mymodel":
 

@@ -5,10 +5,12 @@ package controller_test
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	stdtesting "testing"
 	"time"
 
+	"github.com/juju/errors"
 	"github.com/juju/names/v6"
 	"github.com/juju/tc"
 
@@ -441,6 +443,113 @@ Model  Cloud/Region  Type  Status  Access  Last connection
 
 func (s *ModelsSuite) newCommand() cmd.Command {
 	return controller.NewListModelsCommandForTest(s.api, s.api, s.store)
+}
+
+// addSecondController registers a second controller "another" in the
+// store so --all-controllers has two controllers to visit.
+func (s *ModelsSuite) addSecondController(c *tc.C) {
+	s.store.Controllers["another"] = jujuclient.ControllerDetails{}
+	s.store.Accounts["another"] = jujuclient.AccountDetails{
+		User:     "admin",
+		Password: "password",
+	}
+}
+
+func (s *ModelsSuite) TestAllControllersTabular(c *tc.C) {
+	s.addSecondController(c)
+	apiA := s.api
+	apiB := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+	apiB.infos = s.api.infos
+
+	cmd := controller.NewListModelsCommandForTestWithControllers(
+		map[string]controller.ModelManagerAPI{"fake": apiA, "another": apiB},
+		s.store,
+	)
+	context, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	// Output is grouped by controller, sorted by controller name; each
+	// section matches the single-controller layout. No current model is
+	// highlighted in multi-controller mode.
+	c.Assert(cmdtesting.Stdout(context), tc.Equals, `
+Controller: another
+
+Model                Cloud/Region  Type   Status      Access  Last connection
+prod/test-model1     dummy         local  active      read    2015-03-20
+staging/test-model2  dummy         local  active      write   2015-03-01
+testing/test-model3  dummy         local  destroying  -       never connected
+
+Controller: fake
+
+Model                Cloud/Region  Type   Status      Access  Last connection
+prod/test-model1     dummy         local  active      read    2015-03-20
+staging/test-model2  dummy         local  active      write   2015-03-01
+testing/test-model3  dummy         local  destroying  -       never connected
+`[1:])
+	c.Assert(cmdtesting.Stderr(context), tc.Equals, "")
+}
+
+func (s *ModelsSuite) TestAllControllersJsonGrouped(c *tc.C) {
+	s.addSecondController(c)
+	apiA := s.api
+	apiB := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+	apiB.infos = s.api.infos
+
+	cmd := controller.NewListModelsCommandForTestWithControllers(
+		map[string]controller.ModelManagerAPI{"fake": apiA, "another": apiB},
+		s.store,
+	)
+	context, err := cmdtesting.RunCommand(c, cmd, "--all-controllers", "--format", "json")
+	c.Assert(err, tc.ErrorIsNil)
+	// In multi-controller mode, yaml/json output is grouped by controller.
+	var grouped map[string]json.RawMessage
+	err = json.Unmarshal([]byte(cmdtesting.Stdout(context)), &grouped)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(grouped, tc.HasLen, 2)
+	_, ok := grouped["fake"]
+	c.Assert(ok, tc.IsTrue)
+	_, ok = grouped["another"]
+	c.Assert(ok, tc.IsTrue)
+}
+
+func (s *ModelsSuite) TestAllControllersPartialFailure(c *tc.C) {
+	s.addSecondController(c)
+	apiA := s.api
+	apiB := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+	apiB.err = errors.New("connection refused")
+
+	cmd := controller.NewListModelsCommandForTestWithControllers(
+		map[string]controller.ModelManagerAPI{"fake": apiA, "another": apiB},
+		s.store,
+	)
+	context, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorIsNil)
+	// The working controller's models are still listed. No current model
+	// is highlighted in multi-controller mode.
+	c.Assert(cmdtesting.Stdout(context), tc.Equals, `
+Controller: fake
+
+Model                Cloud/Region  Type   Status      Access  Last connection
+prod/test-model1     dummy         local  active      read    2015-03-20
+staging/test-model2  dummy         local  active      write   2015-03-01
+testing/test-model3  dummy         local  destroying  -       never connected
+`[1:])
+	c.Assert(cmdtesting.Stderr(context), tc.Equals,
+		`could not list models on controller "another": connection refused`+"\n")
+}
+
+func (s *ModelsSuite) TestAllControllersAllFail(c *tc.C) {
+	s.addSecondController(c)
+	apiA := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+	apiA.err = errors.New("connection refused")
+	apiB := &fakeModelMgrAPIClient{Stub: &testhelpers.Stub{}}
+	apiB.err = errors.New("connection refused")
+
+	cmd := controller.NewListModelsCommandForTestWithControllers(
+		map[string]controller.ModelManagerAPI{"fake": apiA, "another": apiB},
+		s.store,
+	)
+	_, err := cmdtesting.RunCommand(c, cmd, "--all-controllers")
+	c.Assert(err, tc.ErrorMatches, "could not list models on any controller")
 }
 
 func (s *ModelsSuite) assertAgentVersionPresent(c *tc.C, testInfo *params.ModelInfo, checker tc.Checker) {

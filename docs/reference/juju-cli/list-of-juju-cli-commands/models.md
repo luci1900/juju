@@ -17,6 +17,7 @@ juju models [options]
 | --- | --- | --- |
 | `-B`, `--no-browser-login` | false | Do not use web browser for authentication |
 | `--all` | false | Lists all models, regardless of user accessibility (administrative users only) |
+| `--all-controllers` | false | List models across all registered controllers |
 | `-c`, `--controller` |  | Controller to operate in |
 | `--exact-time` | false | Use full timestamps |
 | `--format` | tabular | Specify output format (json&#x7c;tabular&#x7c;yaml) |
@@ -28,6 +29,7 @@ juju models [options]
 
     juju models
     juju models --user bob
+    juju models --all-controllers
 
 
 ## Details

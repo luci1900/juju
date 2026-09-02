@@ -121,6 +121,19 @@ func NewListCommandForTest(api UserInfoAPI, modelAPI modelUsersAPI, store jujucl
 	return modelcmd.WrapController(c)
 }
 
+// NewListCommandForTestWithControllers returns a ListCommand with
+// per-controller APIs injected, for exercising --all-controllers.
+func NewListCommandForTestWithControllers(controllerAPIs map[string]UserInfoAPI, store jujuclient.ClientStore, clock clock.Clock) cmd.Command {
+	c := &listCommand{
+		infoCommandBase: infoCommandBase{
+			clock: clock,
+		},
+		controllerAPIs: controllerAPIs,
+	}
+	c.SetClientStore(store)
+	return modelcmd.WrapController(c)
+}
+
 // NewWhoAmICommandForTest returns a whoAMI command with a mock store.
 func NewWhoAmICommandForTest(store jujuclient.ClientStore) cmd.Command {
 	c := &whoAmICommand{store: store}

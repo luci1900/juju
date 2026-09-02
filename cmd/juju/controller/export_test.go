@@ -78,6 +78,16 @@ func NewListModelsCommandForTest(modelAPI ModelManagerAPI, sysAPI ModelsSysAPI, 
 	return modelcmd.WrapController(c)
 }
 
+// NewListModelsCommandForTestWithControllers returns a ListModelsCommand
+// with per-controller APIs injected, for exercising --all-controllers.
+func NewListModelsCommandForTestWithControllers(controllerAPIs map[string]ModelManagerAPI, store jujuclient.ClientStore) cmd.Command {
+	c := &modelsCommand{
+		controllerAPIs: controllerAPIs,
+	}
+	c.SetClientStore(store)
+	return modelcmd.WrapController(c)
+}
+
 // NewRegisterCommandForTest returns a RegisterCommand with the function used
 // to open the API connection mocked out.
 func NewRegisterCommandForTest(apiOpen api.OpenFunc, listModels func(context.Context, jujuclient.ClientStore, string, string) ([]base.UserModel, error), store jujuclient.ClientStore) modelcmd.Command {

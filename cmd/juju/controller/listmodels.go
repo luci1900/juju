@@ -16,7 +16,6 @@ import (
 	"github.com/juju/gnuflag"
 	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/api"
 	"github.com/juju/juju/api/base"
 	"github.com/juju/juju/api/client/modelmanager"
 	"github.com/juju/juju/api/jujuclient"
@@ -65,6 +64,11 @@ type modelsCommand struct {
 	exactTime      bool
 	modelAPI       ModelManagerAPI
 	sysAPI         ModelsSysAPI
+
+	// controllerAPIs optionally maps controller names to injected
+	// clients, for tests. When set, setup uses these instead of opening
+	// connections, for both single- and multi-controller runs.
+	controllerAPIs map[string]ModelManagerAPI
 
 	runVars modelsRunValues
 }
@@ -124,9 +128,9 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 	// TODO(perrito666) 2016-05-02 lp:1558657
 	now := time.Now()
 
-	// Decide which controllers to visit. The single-controller case is a
-	// fan-out over one controller; --all-controllers fans out over every
-	// registered controller. Both share the same worker and merge logic.
+	// The single-controller case is a fan-out over one controller;
+	// --all-controllers fans out over every registered controller. Both
+	// share the same setup, worker and merge logic.
 	var controllerNames []string
 	if c.allControllers {
 		all, err := c.ClientStore().AllControllers()
@@ -141,40 +145,56 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 		controllerNames = []string{controllerName}
 	}
 
-	store := c.ClientStore()
-	opener := func(ctx context.Context, name string) (api.Connection, error) {
-		// In the single-controller path the API may have been injected by
-		// tests; skip opening a real connection in that case.
-		if !c.allControllers && c.modelAPI != nil {
-			return nil, nil
+	// Setup runs sequentially on this goroutine: opening connections may
+	// prompt for credentials and touches unsynchronized CommandBase state,
+	// so it must not run concurrently.
+	setup := func(ctx context.Context, name string) (fanout.Session, error) {
+		account, err := c.ClientStore().AccountDetails(name)
+		if err != nil {
+			return fanout.Session{}, errors.Trace(err)
 		}
-		return c.CommandBase.NewAPIRoot(ctx, store, name, "")
+		// A test may have injected clients; use them instead of opening
+		// connections.
+		if _, ok := c.controllerAPIs[name]; ok {
+			return fanout.Session{Account: *account}, nil
+		}
+		if !c.allControllers && c.modelAPI != nil {
+			return fanout.Session{Account: *account}, nil
+		}
+		conn, err := c.CommandBase.NewAPIRoot(ctx, c.ClientStore(), name, "")
+		if err != nil {
+			return fanout.Session{}, errors.Trace(err)
+		}
+		return fanout.Session{Conn: conn, Account: *account}, nil
 	}
 
 	// user is either the explicit --user value or the empty string, in which
 	// case each worker resolves the per-controller account's user.
 	user := c.user
-	cmdCtx := ctx
-	worker := func(ctx context.Context, conn api.Connection, controllerName string, account jujuclient.AccountDetails) ([]ModelSummary, error) {
-		// In the single-controller path the API may have been injected by
-		// tests; use it directly. Otherwise build a client from the
-		// fan-out connection.
-		var api ModelManagerAPI
-		if !c.allControllers && c.modelAPI != nil {
-			api = c.modelAPI
+	worker := func(ctx context.Context, session fanout.Session, controllerName string) (modelSummaries, error) {
+		// A nil Conn means setup substituted a test-injected client.
+		var client ModelManagerAPI
+		if session.Conn == nil {
+			if api, ok := c.controllerAPIs[controllerName]; ok {
+				client = api
+			} else {
+				client = c.modelAPI
+			}
 		} else {
-			api = modelmanager.NewClient(conn)
-			defer api.Close()
+			client = modelmanager.NewClient(session.Conn)
 		}
-		return c.getModelSummaries(ctx, cmdCtx, api, now, controllerName, user, account)
+		return c.getModelSummaries(ctx, client, now, controllerName, user, session.Account)
 	}
 
-	results := fanout.Run(ctx, store, opener, worker, controllerNames)
+	results := fanout.Run(ctx, setup, worker, controllerNames)
 
-	// In the single-controller path the API was injected by tests; close it
-	// now that the fan-out is done, matching the old defer behavior.
+	// A test-injected client is not owned by the fan-out; close it now
+	// that the fan-out is done, matching the pre-fanout defer behavior.
 	if !c.allControllers && c.modelAPI != nil {
 		_ = c.modelAPI.Close()
+	}
+	for _, api := range c.controllerAPIs {
+		_ = api.Close()
 	}
 
 	var allSummaries []ModelSummary
@@ -188,11 +208,24 @@ func (c *modelsCommand) Run(ctx *cmd.Context) error {
 			// the pre-fanout behavior.
 			return errors.Trace(r.Err)
 		}
-		allSummaries = append(allSummaries, r.Data...)
+		// Per-model errors are downgraded to log messages, mirroring the
+		// single-controller behavior.
+		for _, e := range r.Data.warnings {
+			ctx.Infof("%s", e)
+		}
+		allSummaries = append(allSummaries, r.Data.models...)
+	}
+
+	// A fan-out where no controller returned anything is a failure, even
+	// though individual controller errors were only warned about above.
+	if c.allControllers && fanout.AllFailed(results) {
+		return errors.New("could not list models on any controller")
 	}
 
 	// Single-controller path: Cache models in the client store and mark the
-	// current model so the tabular formatter can highlight it.
+	// current model so the tabular formatter can highlight it. In
+	// multi-controller mode there is no single current model, and models
+	// from N controllers cannot be cached under one controller's name.
 	if !c.allControllers && len(allSummaries) > 0 {
 		modelsToStore := map[string]jujuclient.ModelDetails{}
 		for _, m := range allSummaries {
@@ -262,50 +295,49 @@ func (c *modelsCommand) currentModelName() (qualified, name string) {
 	return
 }
 
-func (c *modelsCommand) getModelManagerAPI(ctx context.Context) (ModelManagerAPI, error) {
-	if c.modelAPI != nil {
-		return c.modelAPI, nil
-	}
-	return c.NewModelManagerAPIClient(ctx)
+// modelSummaries is the per-controller result of getModelSummaries: the
+// converted summaries plus per-model warnings that the caller logs.
+type modelSummaries struct {
+	models   []ModelSummary
+	warnings []string
 }
 
 // getModelSummaries fetches model summaries for the given user from the
 // given API and converts them to ModelSummary values scoped to
-// controllerName. Per-model errors are downgraded to log messages, mirroring
-// the single-controller behavior.
+// controllerName. Per-model errors are returned as warnings for the
+// caller to log, mirroring the single-controller behavior.
 func (c *modelsCommand) getModelSummaries(
 	ctx context.Context,
-	cmdCtx *cmd.Context,
 	api ModelManagerAPI,
 	now time.Time,
 	controllerName string,
 	user string,
 	account jujuclient.AccountDetails,
-) ([]ModelSummary, error) {
+) (modelSummaries, error) {
 	listUser := user
 	if listUser == "" {
 		listUser = account.User
 	}
 	if !names.IsValidUser(listUser) {
-		return nil, errors.NotValidf("user %q", listUser)
+		return modelSummaries{}, errors.NotValidf("user %q", listUser)
 	}
 	summaries, err := api.ListModelSummaries(ctx, listUser, c.all)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return modelSummaries{}, errors.Trace(err)
 	}
-	out := make([]ModelSummary, 0, len(summaries))
+	out := modelSummaries{models: make([]ModelSummary, 0, len(summaries))}
 	for _, result := range summaries {
 		if result.Error != nil {
-			cmdCtx.Infof("%s", result.Error.Error())
+			out.warnings = append(out.warnings, result.Error.Error())
 			continue
 		}
 		summary, err := c.modelSummaryFromParams(result, now)
 		if err != nil {
-			cmdCtx.Infof("%s", err.Error())
+			out.warnings = append(out.warnings, err.Error())
 			continue
 		}
 		summary.ControllerName = controllerName
-		out = append(out, summary)
+		out.models = append(out.models, summary)
 	}
 	return out, nil
 }
@@ -458,7 +490,11 @@ func (c *modelsCommand) formatTabular(writer io.Writer, value any) error {
 	if c.allControllers {
 		return c.tabularSummariesGroupedByController(writer, summariesSet)
 	}
-	return c.tabularSummaries(writer, summariesSet)
+	controllerName, err := c.ControllerName()
+	if err != nil {
+		return errors.Trace(err)
+	}
+	return c.tabularSummaries(writer, summariesSet, controllerName)
 }
 
 // tabularSummariesGroupedByController renders one section per controller in
@@ -483,16 +519,15 @@ func (c *modelsCommand) tabularSummariesGroupedByController(writer io.Writer, mo
 			fmt.Fprintln(writer)
 		}
 		first = false
-		c.runVars.controllerName = controllerName
-		if err := c.tabularSummaries(writer, ModelSummarySet{Models: groups[controllerName]}); err != nil {
+		if err := c.tabularSummaries(writer, ModelSummarySet{Models: groups[controllerName]}, controllerName); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *modelsCommand) tabularColumns(tw *ansiterm.TabWriter, w output.Wrapper) {
-	w.Println("Controller: " + c.runVars.controllerName)
+func (c *modelsCommand) tabularColumns(tw *ansiterm.TabWriter, w output.Wrapper, controllerName string) {
+	w.Println("Controller: " + controllerName)
 	w.Println()
 	w.Print("Model")
 	if c.listUUID {
@@ -524,10 +559,10 @@ func (c *modelsCommand) tabularColumns(tw *ansiterm.TabWriter, w output.Wrapper)
 }
 
 // tabularSummaries takes model summaries set to adhere to the cmd.Formatter interface
-func (c *modelsCommand) tabularSummaries(writer io.Writer, modelSet ModelSummarySet) error {
+func (c *modelsCommand) tabularSummaries(writer io.Writer, modelSet ModelSummarySet, controllerName string) error {
 	tw := output.TabWriter(writer)
 	w := output.Wrapper{tw}
-	c.tabularColumns(tw, w)
+	c.tabularColumns(tw, w, controllerName)
 
 	for _, m := range modelSet.Models {
 		cloudRegion := strings.Trim(m.Cloud+"/"+m.CloudRegion, "/")
