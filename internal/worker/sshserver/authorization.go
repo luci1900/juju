@@ -7,11 +7,9 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/lestrrat-go/jwx/v3/jwt"
 	ssh "github.com/tailscale/gliderssh"
 
 	"github.com/juju/juju/core/logger"
-	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/virtualhostname"
 )
 
@@ -34,27 +32,15 @@ func (a authorizer) Authorize(ctx ssh.Context, destination virtualhostname.Info)
 	if !ok {
 		return false, errors.New("SSH authentication method is missing from connection context")
 	}
-	if publicKey {
-		ok, err := a.access.HasSSHAccessToModel(ctx, ctx.User(), destination)
-		if err != nil {
-			return false, errors.Annotate(err, "checking SSH access")
-		}
-		return ok, nil
+	if !publicKey {
+		// The external-auth JWT password path moved to the HTTP relay
+		// upgrade endpoint; no other authentication method reaches the
+		// authorizer on the jump server any more.
+		return false, errors.New("unsupported SSH authentication method")
 	}
-
-	token, _ := ctx.Value(userJWT{}).(jwt.Token)
-	if token == nil {
-		return false, errors.New("SSH JWT is missing from connection context")
+	ok, err := a.access.HasSSHAccessToModel(ctx, ctx.User(), destination)
+	if err != nil {
+		return false, errors.Annotate(err, "checking SSH access")
 	}
-
-	var rawClaims any
-	if err := token.Get("access", &rawClaims); err != nil {
-		return false, errors.New("invalid SSH JWT token, missing access claim")
-	}
-	claims, ok := rawClaims.(map[string]any)
-	if !ok {
-		return false, errors.New("invalid SSH JWT token, invalid access claim")
-	}
-	access, _ := claims["model-"+destination.ModelUUID().String()].(string)
-	return permission.Access(access).EqualOrGreaterModelAccessThan(permission.AdminAccess), nil
+	return ok, nil
 }

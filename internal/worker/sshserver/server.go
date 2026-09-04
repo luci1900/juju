@@ -18,7 +18,6 @@ import (
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/core/logger"
-	coressh "github.com/juju/juju/core/ssh"
 	"github.com/juju/juju/core/virtualhostname"
 )
 
@@ -34,9 +33,10 @@ type Authenticator interface {
 	// Returns true if the public key is valid for the user.
 	// Handles auth for user public keys.
 	PublicKeyAuthentication(ssh.Context, ssh.PublicKey) (bool, error)
-	// PasswordAuthentication authenticates a jump SSH connection using a password.
-	// Returns true if the password is valid for the user.
-	// Handles auth for external-auth and reverse-tunnel connections.
+	// PasswordAuthentication authenticates a jump SSH connection using a
+	// password. The jump server no longer accepts any password: the
+	// reverse-tunnel and external-auth password paths moved to the HTTP
+	// upgrade endpoints on the API server.
 	PasswordAuthentication(ssh.Context, string) (bool, error)
 }
 
@@ -77,8 +77,6 @@ type ServerWorkerConfig struct {
 	Authorizer Authorizer
 	// ProxyFactory creates target-specific session, forwarding, and SFTP handlers.
 	ProxyFactory ProxyFactory
-	// TunnelTracker accepts incoming reverse SSH tunnel connections.
-	TunnelTracker TunnelTracker
 	// Metrics collects connection and authentication metrics.
 	Metrics *Collector
 }
@@ -105,9 +103,6 @@ func (c ServerWorkerConfig) Validate() error {
 	}
 	if c.ProxyFactory == nil {
 		return errors.NotValidf("missing ProxyFactory")
-	}
-	if c.TunnelTracker == nil {
-		return errors.NotValidf("missing TunnelTracker")
 	}
 	return nil
 }
@@ -205,19 +200,17 @@ func (s *ServerWorker) NewJumpServer() *ssh.Server {
 			return nil
 		},
 		PasswordHandler: func(ctx ssh.Context, password string) bool {
-			ok, err := s.config.Authenticator.PasswordAuthentication(ctx, password)
-			if err != nil {
-				s.config.Metrics.authenticationFailures.WithLabelValues("password").Inc()
-				s.config.Logger.Warningf(ctx, "failed to authenticate password: %v", err)
-				return false
-			}
-			return ok
+			// The jump server no longer accepts passwords: the
+			// reverse-tunnel and external-auth password paths moved to
+			// the HTTP upgrade endpoints on the API server. Keep the
+			// handler so clients get a clean rejection rather than a
+			// protocol error, and count the failures.
+			s.config.Metrics.authenticationFailures.WithLabelValues("password").Inc()
+			return false
 		},
 		ChannelHandlers: map[string]ssh.ChannelHandler{
 			// Handle direct-tcpip channels for jump server connections from users.
 			"direct-tcpip": s.directTCPIPHandler,
-			// Handle reverse-tunnel channels for machine sshsession workers.
-			coressh.JujuTunnelChannel: s.reverseTunnelHandler,
 		},
 	}
 
@@ -308,31 +301,6 @@ func (s *ServerWorker) directTCPIPHandler(srv *ssh.Server, conn *gossh.ServerCon
 
 	server.AddHostKey(signer)
 	server.HandleConn(newChannelConn(ch))
-}
-
-// reverseTunnelHandler accepts a reverse SSH tunnel established by a machine
-// sshsession worker. Ownership of a successfully pushed connection transfers
-// to the tunnel tracker.
-func (s *ServerWorker) reverseTunnelHandler(_ *ssh.Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx ssh.Context) {
-	tunnelID, _ := ctx.Value(tunnelIDKey{}).(string)
-	if tunnelID == "" {
-		s.rejectChannel(ctx, newChan, "missing tunnel ID")
-		return
-	}
-
-	channel, requests, err := newChan.Accept()
-	if err != nil {
-		s.config.Logger.Errorf(ctx, "accepting reverse tunnel channel: %v", err)
-		return
-	}
-	go gossh.DiscardRequests(requests)
-
-	pushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s.config.TunnelTracker.PushTunnel(pushCtx, tunnelID, newChannelConn(channel)); err != nil {
-		s.config.Logger.Errorf(ctx, "pushing reverse tunnel: %v", err)
-		_ = channel.Close()
-	}
 }
 
 // connCallback returns a connCallback function that limits the number of concurrent connections.

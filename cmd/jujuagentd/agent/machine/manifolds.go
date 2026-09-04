@@ -771,9 +771,12 @@ func commonManifolds(config ManifoldsConfig) dependency.Manifolds {
 			TraceName:              controllerTraceName,
 			ObjectStoreName:        objectStoreFacadeName,
 			JWTParserName:          jwtParserName,
+			SSHTunnelerName:        sshTunnelerName,
 			WatcherRegistryName:    watcherRegistryName,
 			FlightRecorderName:     flightRecorderName,
 			ProviderTrackerName:    providerTrackerName,
+			ControllerID:           config.ControllerID,
+			ControllerUUID:         config.ControllerUUID,
 
 			// Note that although there is a transient dependency on dbaccessor
 			// via changestream, the direct dependency supplies the capability

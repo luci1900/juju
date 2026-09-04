@@ -17,8 +17,10 @@ import (
 	"github.com/juju/juju/apiserver"
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication/macaroon"
+	"github.com/juju/juju/apiserver/sshtunnel"
 	"github.com/juju/juju/core/auditlog"
 	"github.com/juju/juju/core/changestream"
+	corecontroller "github.com/juju/juju/core/controller"
 	coredependency "github.com/juju/juju/core/dependency"
 	"github.com/juju/juju/core/flightrecorder"
 	corehttp "github.com/juju/juju/core/http"
@@ -26,13 +28,83 @@ import (
 	corelogger "github.com/juju/juju/core/logger"
 	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/providertracker"
+	"github.com/juju/juju/core/virtualhostname"
 	"github.com/juju/juju/internal/jwtparser"
+	internallogger "github.com/juju/juju/internal/logger"
 	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/common"
 	"github.com/juju/juju/internal/worker/gate"
+	"github.com/juju/juju/internal/worker/sshserver"
+	workerTunneler "github.com/juju/juju/internal/worker/sshtunneler"
 	"github.com/juju/juju/internal/worker/trace"
 	"github.com/juju/juju/internal/worker/watcherregistry"
+	ssh "github.com/tailscale/gliderssh"
 )
+
+// relayProxyFactoryAdapter adapts the sshserver worker's proxy factory
+// to the sshtunnel endpoint's ProxyFactory interface.
+type relayProxyFactoryAdapter struct {
+	factory sshserver.ProxyFactory
+}
+
+// New validates the destination and returns handlers for the target.
+func (a relayProxyFactoryAdapter) New(destination virtualhostname.Info) (sshtunnel.ProxyHandlers, error) {
+	handlers, err := a.factory.New(destination)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	return relayProxyHandlersAdapter{handlers: handlers}, nil
+}
+
+// relayProxyHandlersAdapter adapts the sshserver worker's proxy handlers
+// to the sshtunnel endpoint's ProxyHandlers interface.
+type relayProxyHandlersAdapter struct {
+	handlers sshserver.ProxyHandlers
+}
+
+// SessionHandler returns a handler for proxying SSH sessions.
+func (a relayProxyHandlersAdapter) SessionHandler(session ssh.Session) {
+	a.handlers.SessionHandler(session)
+}
+
+// DirectTCPIPHandler returns a handler for proxying local forwarding.
+func (a relayProxyHandlersAdapter) DirectTCPIPHandler() ssh.ChannelHandler {
+	return a.handlers.DirectTCPIPHandler()
+}
+
+// SFTPHandler returns a handler for proxying SFTP requests.
+func (a relayProxyHandlersAdapter) SFTPHandler() ssh.SubsystemHandler {
+	return a.handlers.SFTPHandler()
+}
+
+// relaySSHServiceAdapter adapts the sshserver worker's SSH service to the
+// sshtunnel endpoint's RelaySSHService interface.
+type relaySSHServiceAdapter struct {
+	service sshserver.SSHService
+}
+
+// VirtualHostKey returns the terminating SSH host key for a virtual
+// hostname.
+func (a relaySSHServiceAdapter) VirtualHostKey(ctx context.Context, info virtualhostname.Info) (string, error) {
+	return a.service.VirtualHostKey(ctx, info)
+}
+
+// relayMetricsAdapter adapts the sshserver metrics collector to the
+// sshtunnel endpoint's MetricsCollector interface.
+type relayMetricsAdapter struct {
+	collector *sshserver.Collector
+}
+
+// IncConnectionCount increments the active connection count.
+func (a relayMetricsAdapter) IncConnectionCount() {
+	a.collector.IncConnectionCount()
+}
+
+// DecConnectionCount decrements the active connection count and records
+// the connection duration.
+func (a relayMetricsAdapter) DecConnectionCount() {
+	a.collector.DecConnectionCount()
+}
 
 // GetControllerConfigServiceFunc is a helper function that gets a
 // [ControllerConfigService] from the manifold.
@@ -90,6 +162,13 @@ type ManifoldConfig struct {
 	TraceName          string
 	ObjectStoreName    string
 	JWTParserName      string
+	SSHTunnelerName    string
+
+	// ControllerID is the ID of the local controller node, used by the
+	// relay endpoint's machine connector for reverse tunnel requests.
+	ControllerID string
+	// ControllerUUID is the UUID of the controller entity.
+	ControllerUUID string
 
 	// Clock is the clock used for timekeeping within the manifold.
 	Clock clock.Clock
@@ -166,6 +245,9 @@ func (config ManifoldConfig) Validate() error {
 	if config.JWTParserName == "" {
 		return errors.NotValidf("empty JWTParserName")
 	}
+	if config.SSHTunnelerName == "" {
+		return errors.NotValidf("empty SSHTunnelerName")
+	}
 	if config.ProviderTrackerName == "" {
 		return errors.NotValidf("empty ProviderTrackerName")
 	}
@@ -204,6 +286,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.ObjectStoreName,
 			config.LogSinkName,
 			config.JWTParserName,
+			config.SSHTunnelerName,
 			config.WatcherRegistryName,
 			config.ProviderTrackerName,
 		},
@@ -322,6 +405,34 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
+	var tunnelTracker workerTunneler.TunnelTracker
+	if err := getter.Get(config.SSHTunnelerName, &tunnelTracker); err != nil {
+		return nil, errors.Trace(err)
+	}
+
+	// Compose the relay endpoint's dependencies from the same building
+	// blocks the sshserver worker uses: the proxy factory (whose machine
+	// connector requests reverse tunnels through the tracker), the
+	// model-resolving SSH service, and a JWT-claims authorizer.
+	controllerSSHService, err := sshserver.GetControllerSSHService(getter, config.DomainServicesName)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	controllerUUID, err := corecontroller.ParseUUID(config.ControllerUUID)
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	relayProxyFactory, relaySSHService, relayAuthorizer := sshserver.RelayDependencies(
+		controllerSSHService,
+		domainServicesGetter,
+		sshserver.GetSSHService,
+		controllerUUID,
+		config.ControllerID,
+		tunnelTracker,
+		internallogger.GetLogger("juju.worker.sshserver"),
+		sshserver.NewMetricsCollector(),
+	)
+
 	// Register the metrics collector against the prometheus register.
 	metricsCollector := config.NewMetricsCollector()
 	if err := config.PrometheusRegisterer.Register(metricsCollector); err != nil {
@@ -355,6 +466,13 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		ModelService:                      modelService,
 		WatcherRegistryGetter:             watcherRegistryGetter,
 		EphemeralProviderFactory:          providerFactory,
+		SSHTunnel: &apiserver.SSHTunnelConfig{
+			TunnelTracker: tunnelTracker,
+			ProxyFactory:  relayProxyFactoryAdapter{factory: relayProxyFactory},
+			SSHService:    relaySSHServiceAdapter{service: relaySSHService},
+			Authorizer:    relayAuthorizer,
+			Metrics:       relayMetricsAdapter{collector: sshserver.NewMetricsCollector()},
+		},
 	})
 	if err != nil {
 		// Ensure we clean up the resources we've registered with. This includes

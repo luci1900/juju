@@ -17,7 +17,6 @@ import (
 
 	"github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/network"
-	coressh "github.com/juju/juju/core/ssh"
 	domainssh "github.com/juju/juju/domain/ssh"
 	"github.com/juju/juju/internal/pki/ssh"
 	"github.com/juju/juju/internal/uuid"
@@ -28,10 +27,7 @@ var (
 )
 
 const (
-	tokenIssuer      = "sshtunneler"
-	tokenSubject     = "reverse-tunnel"
-	tunnelIDClaimKey = "tunnelID"
-	defaultUser      = "ubuntu"
+	defaultUser = "ubuntu"
 )
 
 // ConnRequestState defines an interface to write SSH connection requests to
@@ -70,7 +66,6 @@ type SSHDial interface {
 // The objects keep track of consumers who have requested tunnels
 // and allows an SSH server to push tunnels to these consumers.
 type Tracker struct {
-	authn        tunnelAuthentication
 	connReqState ConnRequestState
 	machines     MachineState
 	controller   ControllerInfo
@@ -115,14 +110,8 @@ func NewTracker(args TrackerArgs) (*Tracker, error) {
 		return nil, err
 	}
 
-	authn, err := newTunnelAuthentication(args.Clock)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Tracker{
 		tracker:      make(map[string]chan (net.Conn)),
-		authn:        authn,
 		controller:   args.ControllerInfo,
 		clock:        args.Clock,
 		connReqState: args.ConnRequestState,
@@ -195,18 +184,14 @@ func (tt *Tracker) RequestTunnel(ctx context.Context, req RequestArgs) (*gossh.C
 		return nil, err
 	}
 
-	// We use the same expiry for the password and the state entry.
-	// The state's expiry is used to clean up any dangling requests.
-	// The password expiry is used to invalidate old passwords.
+	// The state entry's expiry is used to clean up any dangling
+	// requests. Authentication of the machine now happens at the
+	// HTTP layer on the tunnel upgrade endpoint, so no SSH
+	// credentials are minted here.
 	now := tt.clock.Now()
 	ctx, cancel := context.WithDeadline(ctx, now.Add(maxTimeout))
 	defer cancel()
 	deadline, _ := ctx.Deadline()
-
-	password, err := tt.authn.generatePassword(tunnelID.String(), now, deadline)
-	if err != nil {
-		return nil, err
-	}
 
 	privateKey, publicKey, err := tt.generateEphemeralSSHKey()
 	if err != nil {
@@ -234,8 +219,6 @@ func (tt *Tracker) RequestTunnel(ctx context.Context, req RequestArgs) (*gossh.C
 		TunnelID:            tunnelID.String(),
 		MachineName:         req.MachineID,
 		Expires:             deadline,
-		SSHUsername:         coressh.ReverseTunnelUser,
-		SSHPassword:         password,
 		ControllerAddresses: controllerAddresses,
 		UnitPort:            0, // Allow the unit worker to determine the port.
 		EphemeralPublicKey:  publicKey.Marshal(),
@@ -268,24 +251,10 @@ func (tt *Tracker) delete(tunnelID string) {
 	delete(tt.tracker, tunnelID)
 }
 
-// AuthenticateTunnel authenticates an SSH request for a tunnel.
-//
-// An SSH server is expected to call this method to validate that
-// the connection is a valid tunnel request.
-//
-// If the request is valid, the provided tunnelID should be
-// stored and provided alongside the network connection to PushTunnel.
-func (tt *Tracker) AuthenticateTunnel(username, password string) (tunnelID string, err error) {
-	if username != coressh.ReverseTunnelUser {
-		return "", errors.New("invalid username")
-	}
-
-	return tt.authn.validatePassword(password)
-}
-
 // PushTunnel publishes a network connection for a tunnel.
-// This method should only be called after AuthenticateTunnel
-// which will provide the tunnelID.
+// The tunnel ID must have been created by a call to RequestTunnel
+// on this tracker; tunnel IDs from other controller nodes are
+// rejected to preserve origin controller affinity.
 //
 // If an error is returned, e.g. because the tunnel ID is
 // not valid, the caller should close the connection.

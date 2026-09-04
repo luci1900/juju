@@ -28,9 +28,6 @@ type TunnelTracker interface {
 	// RequestTunnel requests a reverse SSH tunnel to a model-specific machine
 	// and blocks until the tunnel is established or the context is cancelled.
 	RequestTunnel(ctx context.Context, req sshtunneler.RequestArgs) (*gossh.Client, error)
-	// AuthenticateTunnel authenticates an incoming reverse-tunnel SSH request
-	// and returns the tunnel ID to pass to PushTunnel.
-	AuthenticateTunnel(username, password string) (tunnelID string, err error)
 	// PushTunnel publishes an established network connection for the tunnel
 	// identified by tunnelID.
 	PushTunnel(ctx context.Context, tunnelID string, conn net.Conn) error
