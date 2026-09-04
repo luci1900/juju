@@ -487,10 +487,11 @@ func (c *CharmHubRepository) listResourcesIfRevisions(resources []charmresource.
 		}
 		for _, res := range refreshResp {
 			if res.Revision == resource.Revision {
-				results[resource.Name], err = resourceFromRevision(refreshResp[0])
+				results[resource.Name], err = resourceFromRevision(res)
 				if err != nil {
 					return nil, errors.Trace(err)
 				}
+				break
 			}
 		}
 	}
