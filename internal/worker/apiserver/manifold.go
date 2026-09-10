@@ -30,6 +30,8 @@ import (
 	"github.com/juju/juju/internal/services"
 	"github.com/juju/juju/internal/worker/common"
 	"github.com/juju/juju/internal/worker/gate"
+	"github.com/juju/juju/internal/worker/sshserver"
+	workerTunneler "github.com/juju/juju/internal/worker/sshtunneler"
 	"github.com/juju/juju/internal/worker/trace"
 	"github.com/juju/juju/internal/worker/watcherregistry"
 )
@@ -90,6 +92,7 @@ type ManifoldConfig struct {
 	TraceName          string
 	ObjectStoreName    string
 	JWTParserName      string
+	SSHTunnelerName    string
 
 	// Clock is the clock used for timekeeping within the manifold.
 	Clock clock.Clock
@@ -166,6 +169,9 @@ func (config ManifoldConfig) Validate() error {
 	if config.JWTParserName == "" {
 		return errors.NotValidf("empty JWTParserName")
 	}
+	if config.SSHTunnelerName == "" {
+		return errors.NotValidf("empty SSHTunnelerName")
+	}
 	if config.ProviderTrackerName == "" {
 		return errors.NotValidf("empty ProviderTrackerName")
 	}
@@ -204,6 +210,7 @@ func Manifold(config ManifoldConfig) dependency.Manifold {
 			config.ObjectStoreName,
 			config.LogSinkName,
 			config.JWTParserName,
+			config.SSHTunnelerName,
 			config.WatcherRegistryName,
 			config.ProviderTrackerName,
 		},
@@ -322,6 +329,11 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
+	var tunnelTracker workerTunneler.TunnelTracker
+	if err := getter.Get(config.SSHTunnelerName, &tunnelTracker); err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	// Register the metrics collector against the prometheus register.
 	metricsCollector := config.NewMetricsCollector()
 	if err := config.PrometheusRegisterer.Register(metricsCollector); err != nil {
@@ -355,6 +367,10 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		ModelService:                      modelService,
 		WatcherRegistryGetter:             watcherRegistryGetter,
 		EphemeralProviderFactory:          providerFactory,
+		SSHTunnel: &apiserver.SSHTunnelConfig{
+			TunnelTracker: tunnelTracker,
+			Metrics:       sshserver.NewMetricsCollector(),
+		},
 	})
 	if err != nil {
 		// Ensure we clean up the resources we've registered with. This includes

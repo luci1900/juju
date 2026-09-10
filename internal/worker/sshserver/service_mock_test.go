@@ -320,9 +320,8 @@ type MockTunnelTracker struct {
 
 // MockTunnelTrackerMockRecorder is the mock recorder for MockTunnelTracker.
 type MockTunnelTrackerMockRecorder struct {
-	mock                      *MockTunnelTracker
-	authenticateTunnelExpects []*gomock.Call2_2[string, string, string, error]
-	pushTunnelExpects         []*gomock.Call3_1[context.Context, string, net.Conn, error]
+	mock              *MockTunnelTracker
+	pushTunnelExpects []*gomock.Call3_2[context.Context, string, net.Conn, <-chan struct{}, error]
 }
 
 // NewMockTunnelTracker creates a new mock instance.
@@ -337,38 +336,20 @@ func (m *MockTunnelTracker) EXPECT() *MockTunnelTrackerMockRecorder {
 	return m.recorder
 }
 
-// AuthenticateTunnel mocks base method.
-func (m *MockTunnelTracker) AuthenticateTunnel(username, password string) (string, error) {
-	m.ctrl.T.Helper()
-	return gomock.Dispatch2_2(&m.recorder.authenticateTunnelExpects, m.ctrl, m, "AuthenticateTunnel", username, password)
-}
-
-// AuthenticateTunnel indicates an expected call of AuthenticateTunnel.
-func (mr *MockTunnelTrackerMockRecorder) AuthenticateTunnel(username, password any) *MockTunnelTrackerAuthenticateTunnelCall {
-	mr.mock.ctrl.T.Helper()
-	call := gomock.NewCall2_2[string, string, string, error](mr.mock.ctrl.T, mr.mock, "AuthenticateTunnel", gomock.EnsureMatcher(username), gomock.EnsureMatcher(password))
-	mr.authenticateTunnelExpects = append(mr.authenticateTunnelExpects, call)
-	mr.mock.ctrl.Track(call.Call)
-	return call
-}
-
-// MockTunnelTrackerAuthenticateTunnelCall is the typed call wrapper for AuthenticateTunnel.
-type MockTunnelTrackerAuthenticateTunnelCall = gomock.Call2_2[string, string, string, error]
-
 // PushTunnel mocks base method.
-func (m *MockTunnelTracker) PushTunnel(arg0 context.Context, arg1 string, arg2 net.Conn) error {
+func (m *MockTunnelTracker) PushTunnel(ctx context.Context, tunnelID string, conn net.Conn) (<-chan struct{}, error) {
 	m.ctrl.T.Helper()
-	return gomock.Dispatch3_1(&m.recorder.pushTunnelExpects, m.ctrl, m, "PushTunnel", arg0, arg1, arg2)
+	return gomock.Dispatch3_2(&m.recorder.pushTunnelExpects, m.ctrl, m, "PushTunnel", ctx, tunnelID, conn)
 }
 
 // PushTunnel indicates an expected call of PushTunnel.
-func (mr *MockTunnelTrackerMockRecorder) PushTunnel(arg0, arg1, arg2 any) *MockTunnelTrackerPushTunnelCall {
+func (mr *MockTunnelTrackerMockRecorder) PushTunnel(ctx, tunnelID, conn any) *MockTunnelTrackerPushTunnelCall {
 	mr.mock.ctrl.T.Helper()
-	call := gomock.NewCall3_1[context.Context, string, net.Conn, error](mr.mock.ctrl.T, mr.mock, "PushTunnel", gomock.EnsureMatcher(arg0), gomock.EnsureMatcher(arg1), gomock.EnsureMatcher(arg2))
+	call := gomock.NewCall3_2[context.Context, string, net.Conn, <-chan struct{}, error](mr.mock.ctrl.T, mr.mock, "PushTunnel", gomock.EnsureMatcher(ctx), gomock.EnsureMatcher(tunnelID), gomock.EnsureMatcher(conn))
 	mr.pushTunnelExpects = append(mr.pushTunnelExpects, call)
 	mr.mock.ctrl.Track(call.Call)
 	return call
 }
 
 // MockTunnelTrackerPushTunnelCall is the typed call wrapper for PushTunnel.
-type MockTunnelTrackerPushTunnelCall = gomock.Call3_1[context.Context, string, net.Conn, error]
+type MockTunnelTrackerPushTunnelCall = gomock.Call3_2[context.Context, string, net.Conn, <-chan struct{}, error]

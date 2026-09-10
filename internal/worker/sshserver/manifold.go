@@ -230,10 +230,9 @@ func (config ManifoldConfig) startWrapperWorker(ctx context.Context, getter depe
 		NewServerWorker:         config.NewServerWorker,
 		Logger:                  config.Logger,
 		Authenticator: authenticator{
-			logger:        config.Logger,
-			jwtParser:     jwtParser,
-			tunnelTracker: tunnelTracker,
-			publicKeys:    sshService,
+			logger:     config.Logger,
+			jwtParser:  jwtParser,
+			publicKeys: sshService,
 		},
 		Authorizer: authorizer{
 			access: sshService,

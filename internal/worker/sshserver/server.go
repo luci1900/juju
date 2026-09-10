@@ -18,7 +18,6 @@ import (
 	"gopkg.in/tomb.v2"
 
 	"github.com/juju/juju/core/logger"
-	coressh "github.com/juju/juju/core/ssh"
 	"github.com/juju/juju/core/virtualhostname"
 )
 
@@ -216,8 +215,6 @@ func (s *ServerWorker) NewJumpServer() *ssh.Server {
 		ChannelHandlers: map[string]ssh.ChannelHandler{
 			// Handle direct-tcpip channels for jump server connections from users.
 			"direct-tcpip": s.directTCPIPHandler,
-			// Handle reverse-tunnel channels for machine sshsession workers.
-			coressh.JujuTunnelChannel: s.reverseTunnelHandler,
 		},
 	}
 
@@ -308,31 +305,6 @@ func (s *ServerWorker) directTCPIPHandler(srv *ssh.Server, conn *gossh.ServerCon
 
 	server.AddHostKey(signer)
 	server.HandleConn(newChannelConn(ch))
-}
-
-// reverseTunnelHandler accepts a reverse SSH tunnel established by a machine
-// sshsession worker. Ownership of a successfully pushed connection transfers
-// to the tunnel tracker.
-func (s *ServerWorker) reverseTunnelHandler(_ *ssh.Server, conn *gossh.ServerConn, newChan gossh.NewChannel, ctx ssh.Context) {
-	tunnelID, _ := ctx.Value(tunnelIDKey{}).(string)
-	if tunnelID == "" {
-		s.rejectChannel(ctx, newChan, "missing tunnel ID")
-		return
-	}
-
-	channel, requests, err := newChan.Accept()
-	if err != nil {
-		s.config.Logger.Errorf(ctx, "accepting reverse tunnel channel: %v", err)
-		return
-	}
-	go gossh.DiscardRequests(requests)
-
-	pushCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s.config.TunnelTracker.PushTunnel(pushCtx, tunnelID, newChannelConn(channel)); err != nil {
-		s.config.Logger.Errorf(ctx, "pushing reverse tunnel: %v", err)
-		_ = channel.Close()
-	}
 }
 
 // connCallback returns a connCallback function that limits the number of concurrent connections.

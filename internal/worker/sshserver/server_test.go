@@ -5,10 +5,7 @@ package sshserver
 
 import (
 	"bytes"
-	"context"
 	"fmt"
-	"io"
-	"net"
 	"testing"
 	"time"
 
@@ -21,7 +18,6 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/juju/juju/core/logger"
-	coressh "github.com/juju/juju/core/ssh"
 	"github.com/juju/juju/core/virtualhostname"
 	loggertesting "github.com/juju/juju/internal/logger/testing"
 	"github.com/juju/juju/internal/pki/test"
@@ -324,46 +320,6 @@ func (s *sshServerSuite) TestServerRejectsUnauthorizedDestination(c *tc.C) {
 	client := dialSSHServer(c, listener, "alice", gossh.PublicKeys(s.userSigner))
 	_, err = client.Dial("tcp", fmt.Sprintf("%s:0", testVirtualHostname))
 	c.Check(err, tc.ErrorMatches, ".*unauthorized.*")
-}
-
-func (s *sshServerSuite) TestServerAcceptsReverseTunnel(c *tc.C) {
-	s.SetUpMocks(c)
-
-	tunnelPushed := make(chan struct{})
-	const tunnelPayload = "reverse tunnel payload"
-	s.authenticator.EXPECT().PasswordAuthentication(gomock.Any(), "tunnel-password").DoAndReturn(
-		func(ctx ssh.Context, password string) (bool, error) {
-			ctx.SetValue(tunnelIDKey{}, "tunnel-id")
-			return true, nil
-		})
-	s.tunnelTracker.EXPECT().PushTunnel(gomock.Any(), "tunnel-id", gomock.Any()).Do(
-		func(_ context.Context, _ string, tunnelConn net.Conn) {
-			// Checking the payload proves the handler transfers a usable tunnel
-			// connection to the tracker.
-			payload := make([]byte, len(tunnelPayload))
-			_, err := io.ReadFull(tunnelConn, payload)
-			c.Check(err, tc.ErrorIsNil)
-			c.Check(string(payload), tc.Equals, tunnelPayload)
-			close(tunnelPushed)
-		})
-
-	_, listener, cleanup := s.newServer(c)
-	defer cleanup()
-
-	client := dialSSHServer(c, listener, coressh.ReverseTunnelUser, gossh.Password("tunnel-password"))
-	channel, requests, err := client.OpenChannel(coressh.JujuTunnelChannel, nil)
-	c.Assert(err, tc.ErrorIsNil)
-	c.Cleanup(func() { _ = channel.Close() })
-	go gossh.DiscardRequests(requests)
-
-	_, err = channel.Write([]byte(tunnelPayload))
-	c.Assert(err, tc.ErrorIsNil)
-
-	select {
-	case <-tunnelPushed:
-	case <-c.Context().Done():
-		c.Error("timed out waiting for reverse tunnel to be pushed")
-	}
 }
 
 func (s *sshServerSuite) TestSSHServerMaxConnections(c *tc.C) {

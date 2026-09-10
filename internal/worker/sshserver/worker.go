@@ -29,17 +29,12 @@ type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
 }
 
-// TunnelTracker authenticates and track reverse SSH tunnels.
-//
-// It authenticates the tunnel request to obtain a tunnel ID
-// that associates the tunnel with a request for a connection
-// to the specific machine.
+// TunnelTracker tracks reverse SSH tunnels pushed by machine agents.
 type TunnelTracker interface {
-	// AuthenticateTunnel authenticates a reverse SSH tunnel request and
-	// returns the tunnel ID that needs to be passed to PushTunnel.
-	AuthenticateTunnel(username, password string) (string, error)
-	// PushTunnel registers a reverse SSH tunnel connection with the given tunnel ID.
-	PushTunnel(context.Context, string, net.Conn) error
+	// PushTunnel publishes an established connection for the tunnel
+	// identified by tunnelID. The returned channel is closed when the
+	// connection is closed.
+	PushTunnel(ctx context.Context, tunnelID string, conn net.Conn) (<-chan struct{}, error)
 }
 
 // SSHService resolves controller host keys, user public keys, and terminating
