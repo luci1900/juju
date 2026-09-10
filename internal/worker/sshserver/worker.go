@@ -5,7 +5,6 @@ package sshserver
 
 import (
 	"context"
-	"net"
 	"sync"
 
 	"github.com/juju/errors"
@@ -14,9 +13,8 @@ import (
 
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/logger"
-	coremachine "github.com/juju/juju/core/machine"
-	"github.com/juju/juju/core/virtualhostname"
 	"github.com/juju/juju/core/watcher"
+	"github.com/juju/juju/internal/sshproxy"
 )
 
 // ControllerConfigService is the interface that the worker uses to get the
@@ -29,39 +27,17 @@ type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
 }
 
-// TunnelTracker tracks reverse SSH tunnels pushed by machine agents.
-type TunnelTracker interface {
-	// PushTunnel publishes an established connection for the tunnel
-	// identified by tunnelID. The returned channel is closed when the
-	// connection is closed.
-	PushTunnel(ctx context.Context, tunnelID string, conn net.Conn) (<-chan struct{}, error)
-}
-
-// SSHService resolves controller host keys, user public keys, and terminating
-// host keys for routed destinations.
-type SSHService interface {
-	// VirtualHostKey returns the terminating host key for a routed destination.
-	VirtualHostKey(context.Context, virtualhostname.Info) (string, error)
-	// ResolveK8sExecInfo resolves Kubernetes execution information for a routed
-	// destination.
-	ResolveK8sExecInfo(context.Context, virtualhostname.Info) (namespace, podName string, err error)
-	// MachineForDestination resolves the machine for a routed destination.
-	MachineForDestination(context.Context, virtualhostname.Info) (coremachine.Name, error)
-	// SSHServerHostKey returns the controller's SSH server host key.
-	SSHServerHostKey(context.Context) (string, error)
-}
-
 // ServerWrapperWorkerConfig holds the configuration required by the server wrapper worker.
 type ServerWrapperWorkerConfig struct {
 	ControllerConfigService ControllerConfigService
-	SSHService              SSHService
+	SSHService              sshproxy.SSHService
 	NewServerWorker         func(ServerWorkerConfig) (worker.Worker, error)
 	Logger                  logger.Logger
 	Authenticator           Authenticator
 	Authorizer              Authorizer
-	ProxyFactory            ProxyFactory
-	TunnelTracker           TunnelTracker
-	Metrics                 *Collector
+	ProxyFactory            sshproxy.ProxyFactory
+
+	Metrics *Collector
 }
 
 // Validate validates the workers configuration is as expected.
@@ -89,9 +65,6 @@ func (c ServerWrapperWorkerConfig) Validate() error {
 	}
 	if c.ProxyFactory == nil {
 		return errors.NotValidf("ProxyFactory is required")
-	}
-	if c.TunnelTracker == nil {
-		return errors.NotValidf("TunnelTracker is required")
 	}
 	return nil
 }
@@ -197,7 +170,6 @@ func (ssw *serverWrapperWorker) loop() error {
 		Authenticator:            ssw.config.Authenticator,
 		Authorizer:               ssw.config.Authorizer,
 		ProxyFactory:             ssw.config.ProxyFactory,
-		TunnelTracker:            ssw.config.TunnelTracker,
 		Metrics:                  ssw.config.Metrics,
 	})
 	ssw.addWorkerReporter("ssh-server", srv)

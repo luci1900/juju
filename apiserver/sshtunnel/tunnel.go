@@ -195,9 +195,6 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // machine name, set by the apiserver from the request's auth info.
 type AuthenticatedMachineNameKey struct{}
 
-// DyingKey is the context key for the apiserver dying signal.
-type DyingKey struct{}
-
 // dyingFromContext extracts the apiserver dying signal from the request
 // context. The apiserver sets it via the handler wrapper.
 func dyingFromContext(ctx context.Context) <-chan struct{} {

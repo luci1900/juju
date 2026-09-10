@@ -10,7 +10,6 @@ import (
 
 	"github.com/juju/tc"
 	sshtesting "github.com/juju/utils/v4/ssh/testing"
-	"github.com/lestrrat-go/jwx/v3/jwt"
 	ssh "github.com/tailscale/gliderssh"
 	gossh "golang.org/x/crypto/ssh"
 
@@ -24,46 +23,17 @@ func TestAuthenticationSuite(t *testing.T) {
 	tc.Run(t, &authenticationSuite{})
 }
 
-func (s *authenticationSuite) TestPasswordAuthenticationRejectsUnexpectedUser(c *tc.C) {
+func (s *authenticationSuite) TestPasswordAuthenticationRejectsAllPasswords(c *tc.C) {
+	// The reverse-tunnel and external-auth password paths moved to the
+	// HTTP upgrade endpoints on the API server; no password is valid on
+	// the jump server any more.
 	ctx := &stubAuthenticationContext{user: "alice", values: map[any]any{}}
 	auth := authenticator{
 		logger: loggertesting.WrapCheckLog(c),
 	}
-	authenticated, err := auth.PasswordAuthentication(ctx, "not-a-token")
+	authenticated, err := auth.PasswordAuthentication(ctx, "anything")
 	c.Check(err, tc.ErrorIsNil)
 	c.Check(authenticated, tc.IsFalse)
-	c.Check(ctx.values[authenticatedViaPublicKey{}], tc.Equals, false)
-}
-
-func (s *authenticationSuite) TestPasswordAuthenticationAcceptsJIMMJWT(c *tc.C) {
-	token, err := jwt.NewBuilder().Subject("alice").Build()
-	c.Assert(err, tc.ErrorIsNil)
-	ctx := &stubAuthenticationContext{user: externalAuthUser, values: map[any]any{}}
-	parser := &stubJWTParser{token: token}
-
-	auth := authenticator{jwtParser: parser}
-	authenticated, err := auth.PasswordAuthentication(ctx, "encoded-jwt")
-	c.Check(err, tc.ErrorIsNil)
-	c.Check(authenticated, tc.IsTrue)
-	c.Check(ctx.values[authenticatedViaPublicKey{}], tc.Equals, false)
-	c.Check(ctx.values[userJWT{}], tc.Equals, token)
-	c.Check(parser.password, tc.Equals, "encoded-jwt")
-}
-
-func (s *authenticationSuite) TestPasswordAuthenticationRejectsInvalidJIMMJWT(c *tc.C) {
-	ctx := &stubAuthenticationContext{user: externalAuthUser, values: map[any]any{}}
-	parser := &stubJWTParser{err: errors.New("invalid token")}
-
-	auth := authenticator{
-		logger:    loggertesting.WrapCheckLog(c),
-		jwtParser: parser,
-	}
-	authenticated, err := auth.PasswordAuthentication(ctx, "invalid-jwt")
-	c.Check(err, tc.ErrorMatches, "parsing SSH JWT: invalid token")
-	c.Check(authenticated, tc.IsFalse)
-	c.Check(ctx.values[authenticatedViaPublicKey{}], tc.Equals, false)
-	c.Check(ctx.values[userJWT{}], tc.IsNil)
-	c.Check(parser.password, tc.Equals, "invalid-jwt")
 }
 
 func (s *authenticationSuite) TestPublicKeyAuthenticationAcceptsUsersKey(c *tc.C) {
@@ -120,17 +90,6 @@ func parseAuthorizedKey(c *tc.C, key string) gossh.PublicKey {
 	publicKey, _, _, _, err := gossh.ParseAuthorizedKey([]byte(key))
 	c.Assert(err, tc.ErrorIsNil)
 	return publicKey
-}
-
-type stubJWTParser struct {
-	token    jwt.Token
-	err      error
-	password string
-}
-
-func (s *stubJWTParser) Parse(_ context.Context, password string) (jwt.Token, error) {
-	s.password = password
-	return s.token, s.err
 }
 
 type stubUserPublicKeyService struct {

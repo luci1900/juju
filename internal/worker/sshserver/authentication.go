@@ -8,7 +8,6 @@ import (
 	"context"
 
 	"github.com/juju/errors"
-	"github.com/lestrrat-go/jwx/v3/jwt"
 	ssh "github.com/tailscale/gliderssh"
 	gossh "golang.org/x/crypto/ssh"
 
@@ -17,26 +16,19 @@ import (
 
 type authenticatedViaPublicKey struct{}
 
-type userJWT struct{}
-
-const externalAuthUser = "external-auth"
-
-// JWTParser parses a JWT in the password authentication payload.
-type JWTParser interface {
-	// Parse parses the provided JWT string and returns a jwt.Token if valid.
-	Parse(context.Context, string) (jwt.Token, error)
-}
-
 // UserPublicKeyService retrieves the public keys registered for a user.
 type UserPublicKeyService interface {
 	PublicKeys(context.Context, string) ([]gossh.PublicKey, error)
 }
 
 // authenticator implements the Authenticator interface for the SSH server.
-// It handles public key authentication by users.
+// It handles public key authentication by users. Password authentication
+// is removed: machine reverse tunnels and JIMM relay sessions now
+// authenticate at the HTTP layer on the API server's upgrade endpoints,
+// so the jump server rejects all passwords and key-less users get a clean
+// public key rejection instead of an "enter password:" prompt.
 type authenticator struct {
 	logger     logger.Logger
-	jwtParser  JWTParser
 	publicKeys UserPublicKeyService
 }
 
@@ -57,21 +49,9 @@ func (a authenticator) PublicKeyAuthentication(ctx ssh.Context, key ssh.PublicKe
 	return false, nil
 }
 
-// PasswordAuthentication implements a password authentication handler.
-// It supports two types of password authentication:
-// 1. Decoding a JWT as the password for external-auth.
-// 2. Reverse-tunnel authentication for machine agents.
-func (a authenticator) PasswordAuthentication(ctx ssh.Context, password string) (bool, error) {
-	ctx.SetValue(authenticatedViaPublicKey{}, false)
-
-	switch ctx.User() {
-	case externalAuthUser:
-		token, err := a.jwtParser.Parse(ctx, password)
-		if err != nil {
-			return false, errors.Annotate(err, "parsing SSH JWT")
-		}
-		ctx.SetValue(userJWT{}, token)
-		return true, nil
-	}
+// PasswordAuthentication rejects all password authentication attempts.
+// The reverse-tunnel and external-auth password paths moved to the HTTP
+// upgrade endpoints; no password is valid on the jump server any more.
+func (a authenticator) PasswordAuthentication(_ ssh.Context, _ string) (bool, error) {
 	return false, nil
 }
