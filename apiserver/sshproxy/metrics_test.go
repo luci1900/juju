@@ -24,13 +24,15 @@ func TestMetricsSuite(t *testing.T) {
 func (s *metricsSuite) TestMetricsAreCollected(c *tc.C) {
 	collector := NewMetricsCollector()
 
+	collector.IncConnectionCount("relay")
 	collector.IncConnectionCount("tunnel")
 	collector.IncConnectionCount("tunnel")
 	collector.DecConnectionCount("tunnel")
 
 	expected := bytes.NewBuffer([]byte(`
-# HELP juju_sshproxy_connection_count The number of active SSH tunnel upgrade connections.
+# HELP juju_sshproxy_connection_count The number of active SSH tunnel or relay upgrade connections.
 # TYPE juju_sshproxy_connection_count gauge
+juju_sshproxy_connection_count{endpoint="relay"} 1
 juju_sshproxy_connection_count{endpoint="tunnel"} 1
 `[1:]))
 

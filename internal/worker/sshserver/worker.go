@@ -13,8 +13,6 @@ import (
 
 	"github.com/juju/juju/controller"
 	"github.com/juju/juju/core/logger"
-	coremachine "github.com/juju/juju/core/machine"
-	"github.com/juju/juju/core/virtualhostname"
 	"github.com/juju/juju/core/watcher"
 )
 
@@ -28,20 +26,6 @@ type ControllerConfigService interface {
 	ControllerConfig(context.Context) (controller.Config, error)
 }
 
-// SSHService resolves controller host keys, user public keys, and terminating
-// host keys for routed destinations.
-type SSHService interface {
-	// VirtualHostKey returns the terminating host key for a routed destination.
-	VirtualHostKey(context.Context, virtualhostname.Info) (string, error)
-	// ResolveK8sExecInfo resolves Kubernetes execution information for a routed
-	// destination.
-	ResolveK8sExecInfo(context.Context, virtualhostname.Info) (namespace, podName string, err error)
-	// MachineForDestination resolves the machine for a routed destination.
-	MachineForDestination(context.Context, virtualhostname.Info) (coremachine.Name, error)
-	// SSHServerHostKey returns the controller's SSH server host key.
-	SSHServerHostKey(context.Context) (string, error)
-}
-
 // ServerWrapperWorkerConfig holds the configuration required by the server wrapper worker.
 type ServerWrapperWorkerConfig struct {
 	ControllerConfigService ControllerConfigService
@@ -50,8 +34,9 @@ type ServerWrapperWorkerConfig struct {
 	Logger                  logger.Logger
 	Authenticator           Authenticator
 	Authorizer              Authorizer
-	ProxyFactory            ProxyFactory
-	Metrics                 *Collector
+	ServerFactory           TerminatingServerFactory
+
+	Metrics *Collector
 }
 
 // Validate validates the workers configuration is as expected.
@@ -77,8 +62,8 @@ func (c ServerWrapperWorkerConfig) Validate() error {
 	if c.Authorizer == nil {
 		return errors.NotValidf("Authorizer is required")
 	}
-	if c.ProxyFactory == nil {
-		return errors.NotValidf("ProxyFactory is required")
+	if c.ServerFactory == nil {
+		return errors.NotValidf("ServerFactory is required")
 	}
 	return nil
 }
@@ -183,7 +168,7 @@ func (ssw *serverWrapperWorker) loop() error {
 		SSHService:               ssw.config.SSHService,
 		Authenticator:            ssw.config.Authenticator,
 		Authorizer:               ssw.config.Authorizer,
-		ProxyFactory:             ssw.config.ProxyFactory,
+		ServerFactory:            ssw.config.ServerFactory,
 		Metrics:                  ssw.config.Metrics,
 	})
 	ssw.addWorkerReporter("ssh-server", srv)

@@ -20,11 +20,14 @@ const (
 	// pushing a reverse tunnel to the controller.
 	TunnelUpgradeToken = "juju-ssh-tunnel"
 
+	// RelayUpgradeToken is the HTTP upgrade token used by JIMM to relay a
+	// user's SSH session to the controller.
+	RelayUpgradeToken = "juju-ssh-relay"
+
+	// pushTunnelTimeout bounds the wait for a RequestTunnel consumer to
+	// take ownership of a pushed tunnel connection.
 	pushTunnelTimeout = 10 * time.Second
 )
-
-// DyingKey is the context key for the apiserver dying signal.
-type DyingKey struct{}
 
 // hijack upgrades the HTTP request to a raw connection. It validates the
 // upgrade headers, writes the 101 Switching Protocols response, hijacks

@@ -71,7 +71,7 @@ func (cfg TunnelHandlerConfig) Validate() error {
 	return nil
 }
 
-// MetricsCollector counts active SSH tunnel connections.
+// MetricsCollector counts active SSH tunnel and relay connections.
 type MetricsCollector interface {
 	IncConnectionCount(endpoint string)
 	DecConnectionCount(endpoint string)

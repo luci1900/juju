@@ -9,18 +9,19 @@ import (
 
 const metricsNamespace = "juju_sshproxy"
 
-// Collector collects SSH tunnel upgrade connection metrics.
+// Collector collects SSH tunnel and relay upgrade connection metrics.
 type Collector struct {
 	connectionCount *prometheus.GaugeVec
 }
 
-// NewMetricsCollector returns a collector for SSH tunnel endpoints.
+// NewMetricsCollector returns a collector for SSH tunnel and relay
+// endpoints.
 func NewMetricsCollector() *Collector {
 	return &Collector{
 		connectionCount: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Name:      "connection_count",
-			Help:      "The number of active SSH tunnel upgrade connections.",
+			Help:      "The number of active SSH tunnel or relay upgrade connections.",
 		}, []string{"endpoint"}),
 	}
 }
