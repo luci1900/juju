@@ -342,7 +342,13 @@ func (api *UserManagerAPI) UserInfo(ctx context.Context, request params.UserInfo
 
 		// Get users filtered by the apiUser name as a creator
 		user, err := api.accessService.GetUserByName(ctx, coreuser.NameFromTag(userTag))
-		if err != nil {
+		if errors.Is(err, accesserrors.UserNotFound) {
+			// The caller has no local user record, for example a caller
+			// authorized by a delegator.
+			user = coreuser.User{
+				Name: coreuser.NameFromTag(userTag),
+			}
+		} else if err != nil {
 			return results, errors.Trace(err)
 		}
 

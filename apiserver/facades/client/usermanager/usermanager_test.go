@@ -27,6 +27,7 @@ import (
 	blockcommanderrors "github.com/juju/juju/domain/blockcommand/errors"
 	modelerrors "github.com/juju/juju/domain/model/errors"
 	"github.com/juju/juju/internal/auth"
+	loggertesting "github.com/juju/juju/internal/logger/testing"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
 )
@@ -51,6 +52,23 @@ func (s *userManagerSuite) SetUpTest(c *tc.C) {
 	s.ApiServerSuite.SetUpTest(c)
 
 	s.setAPIUserAndAuth(c, "admin")
+}
+
+// TestNewUserManagerAPIWithoutLocalRecord covers facade construction for a
+// caller with no local user record, for example a caller authorized by a
+// delegator. The facade must still construct so read methods work.
+func (s *userManagerSuite) TestNewUserManagerAPIWithoutLocalRecord(c *tc.C) {
+	user := names.NewUserTag("bob@external")
+	authorizer := apiservertesting.FakeAuthorizer{Tag: user}
+
+	api, err := usermanager.NewUserManagerAPI(c.Context(), facadetest.ModelContext{
+		Auth_:           authorizer,
+		DomainServices_: s.ControllerDomainServices(c),
+		ControllerUUID_: s.ControllerUUID,
+		Logger_:         loggertesting.WrapCheckLog(c),
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(api, tc.NotNil)
 }
 
 func (s *userManagerSuite) TestAddUser(c *tc.C) {
@@ -370,6 +388,33 @@ func (s *userManagerSuite) TestUserInfo(c *tc.C) {
 	c.Assert(r4, tc.NotNil)
 	c.Check(r4.Username, tc.Equals, "mary@external")
 	c.Check(r4.Access, tc.Equals, string(permission.SuperuserAccess))
+}
+
+// TestUserInfoSelfWithoutLocalRecord covers a caller with no local user
+// record, for example a caller authorized by a delegator, reading their
+// own info.
+func (s *userManagerSuite) TestUserInfoSelfWithoutLocalRecord(c *tc.C) {
+	user := names.NewUserTag("bob@external")
+	s.setAPIUserAndAuth(c, user.Id())
+	defer s.setUpAPI(c).Finish()
+
+	s.accessService.EXPECT().GetUserByName(
+		gomock.Any(), coreuser.NameFromTag(user),
+	).Return(coreuser.User{}, usererrors.UserNotFound)
+	s.accessService.EXPECT().ReadUserAccessLevelForTarget(
+		gomock.Any(), coreuser.NameFromTag(user), permission.ID{
+			ObjectType: permission.Controller,
+			Key:        s.ControllerUUID,
+		}).Return(permission.LoginAccess, nil)
+
+	results, err := s.api.UserInfo(c.Context(), params.UserInfoRequest{})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Error, tc.IsNil)
+	r := results.Results[0].Result
+	c.Assert(r, tc.NotNil)
+	c.Check(r.Username, tc.Equals, "bob@external")
+	c.Check(r.Access, tc.Equals, string(permission.LoginAccess))
 }
 
 func (s *userManagerSuite) TestUserInfoAll(c *tc.C) {

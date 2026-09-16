@@ -604,7 +604,11 @@ func (m *ModelManagerAPI) listModelSummariesForUser(
 	}
 	result := params.ModelSummaryResults{}
 	userUUID, err := m.accessService.GetUserUUIDByName(ctx, coreuser.NameFromTag(tag))
-	if err != nil {
+	if errors.Is(err, accesserrors.UserNotFound) {
+		// The user has no local record, for example a caller authorized
+		// by a delegator. They have no models on this controller.
+		return result, nil
+	} else if err != nil {
 		return result, makeErrorReturn(err)
 	}
 
@@ -760,7 +764,11 @@ func (m *ModelManagerAPI) ListModels(ctx context.Context, userEntity params.Enti
 	}
 
 	userUUID, err := m.accessService.GetUserUUIDByName(ctx, coreuser.NameFromTag(userTag))
-	if err != nil {
+	if errors.Is(err, accesserrors.UserNotFound) {
+		// The user has no local record, for example a caller authorized
+		// by a delegator. They have no models on this controller.
+		return result, nil
+	} else if err != nil {
 		return result, errors.Trace(err)
 	}
 

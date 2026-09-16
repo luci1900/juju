@@ -16,6 +16,7 @@ import (
 	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/permission"
 	coreuser "github.com/juju/juju/core/user"
+	accesserrors "github.com/juju/juju/domain/access/errors"
 )
 
 // Register is called to expose a package of facades onto a given registry.
@@ -48,7 +49,14 @@ func newUserManagerAPI(stdCtx context.Context, ctx facade.ModelContext) (*UserMa
 	accessService := domainServices.Access()
 
 	apiUser, err := accessService.GetUserByName(stdCtx, coreuser.NameFromTag(apiUserTag))
-	if err != nil {
+	if errors.Is(err, accesserrors.UserNotFound) {
+		// The caller has no local user record, for example a caller
+		// authorized by a delegator. Reads still work with a synthesized
+		// user; only writes that need a real user UUID will fail later.
+		apiUser = coreuser.User{
+			Name: coreuser.NameFromTag(apiUserTag),
+		}
+	} else if err != nil {
 		return nil, errors.Trace(err)
 	}
 

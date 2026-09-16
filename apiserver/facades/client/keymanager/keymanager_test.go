@@ -82,8 +82,10 @@ func (s *keyManagerSuite) setupMocks(c *tc.C) *gomock.Controller {
 	return ctrl
 }
 
-// TestListKeysForUserNotFound is asserting that if we attempt to list keys for
-// a user that doesn't exist we get back a [params.CodeUserNotFound] error.
+// TestListKeysForUserNotFound is asserting that if we list keys for an
+// authenticated caller with no local user record, for example a caller
+// authorized by a delegator, we get back an empty result rather than an
+// error.
 func (s *keyManagerSuite) TestListKeysForUserNotFound(c *tc.C) {
 	defer s.setupMocks(c).Finish()
 
@@ -113,10 +115,7 @@ func (s *keyManagerSuite) TestListKeysForUserNotFound(c *tc.C) {
 	c.Assert(results, tc.DeepEquals, params.StringsResults{
 		Results: []params.StringsResult{
 			{
-				Error: &params.Error{
-					Code:    params.CodeUserNotFound,
-					Message: "user \"admin\" does not exist",
-				},
+				Result: nil,
 			},
 		},
 	})

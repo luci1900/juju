@@ -1483,6 +1483,47 @@ func (s *modelManagerSuite) TestListModelsDenied(c *tc.C) {
 	c.Assert(err, tc.ErrorIs, apiservererrors.ErrPerm)
 }
 
+// TestListModelsUserWithoutLocalRecord covers a caller with no local user
+// record, for example a caller authorized by a delegator. They have no
+// models on this controller, so the result is empty rather than an error.
+func (s *modelManagerSuite) TestListModelsUserWithoutLocalRecord(c *tc.C) {
+	userTag := names.NewUserTag("bob@external")
+
+	defer s.setUpAPIWithUser(c, userTag).Finish()
+
+	s.accessService.EXPECT().GetUserUUIDByName(
+		gomock.Any(), coreuser.NameFromTag(userTag),
+	).Return("", accesserrors.UserNotFound)
+
+	results, err := s.api.ListModels(
+		c.Context(),
+		params.Entity{Tag: userTag.String()},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.UserModelList{})
+}
+
+// TestListModelSummariesUserWithoutLocalRecord covers a caller with no
+// local user record, for example a caller authorized by a delegator. They
+// have no models on this controller, so the result is empty rather than an
+// error.
+func (s *modelManagerSuite) TestListModelSummariesUserWithoutLocalRecord(c *tc.C) {
+	userTag := names.NewUserTag("bob@external")
+
+	defer s.setUpAPIWithUser(c, userTag).Finish()
+
+	s.accessService.EXPECT().GetUserUUIDByName(
+		gomock.Any(), coreuser.NameFromTag(userTag),
+	).Return("", accesserrors.UserNotFound)
+
+	results, err := s.api.ListModelSummaries(
+		c.Context(),
+		params.ModelSummariesRequest{UserTag: userTag.String()},
+	)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(results, tc.DeepEquals, params.ModelSummaryResults{})
+}
+
 // modelManagerStateSuite contains end-to-end tests.
 // Prefer adding tests to modelManagerSuite above.
 type modelManagerStateSuite struct {

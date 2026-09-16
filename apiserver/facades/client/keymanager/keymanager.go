@@ -105,15 +105,11 @@ func (api *KeyManagerAPI) ListKeys(
 
 		user, err := api.userService.GetUserByName(ctx, authedUserName)
 		if errors.Is(err, accesserrors.UserNotFound) {
-			// We are only checking for the authenticated user here and not the
-			// user that has been passed in by params. This is because the juju
-			// client currently only supplies admin.
+			// The authenticated caller has no local user record, for
+			// example a caller authorized by a delegator. They have no
+			// keys stored on this controller.
 			results = append(results, params.StringsResult{
-				Error: apiservererrors.ParamsErrorf(
-					params.CodeUserNotFound,
-					"user %q does not exist",
-					api.authedUser.Id(),
-				),
+				Result: nil,
 			})
 			continue
 		} else if err != nil {
