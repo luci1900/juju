@@ -141,7 +141,7 @@ type Server struct {
 	healthStatus string
 
 	// sshTunnelConfig holds the SSH tunnel endpoint dependencies, or nil
-	// when the endpoint is not registered.
+	// when the endpoints are not registered.
 	sshTunnelConfig *SSHTunnelConfig
 
 	// publicDNSName_ holds the value that will be returned in
@@ -274,21 +274,23 @@ type ServerConfig struct {
 	// require them, but where the provider does not need to be tracked.
 	EphemeralProviderFactory providertracker.EphemeralProviderFactory
 
-	// SSHTunnelConfig configures the SSH reverse tunnel upgrade endpoint.
-	// If it is nil the endpoint is not registered (for example in tests
-	// that do not exercise the SSH tunnel path).
+	// SSHTunnelConfig configures the SSH reverse tunnel and relay upgrade
+	// endpoints. If it is nil the endpoints are not registered (for example
+	// in tests that do not exercise the SSH tunnel paths).
 	SSHTunnelConfig *SSHTunnelConfig
 }
 
-// SSHTunnelConfig holds the dependencies for the SSH tunnel upgrade
-// endpoint.
+// SSHTunnelConfig holds the dependencies for the SSH tunnel and relay
+// upgrade endpoints.
 type SSHTunnelConfig struct {
 	// TunnelTracker accepts reverse tunnel connections pushed by machine
 	// agents. It is the sshtunneler worker's output, local to this
 	// controller node.
 	TunnelTracker sshproxy.TunnelTracker
-	// Metrics collects connection metrics for the SSH tunnel upgrade
-	// endpoint.
+	// ServerFactory builds the per-destination terminating SSH server.
+	ServerFactory sshproxy.TerminatingServerFactory
+	// Metrics collects connection metrics for the SSH tunnel and relay
+	// upgrade endpoints.
 	Metrics sshproxy.MetricsCollector
 }
 
@@ -1002,10 +1004,10 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		ctxt: httpCtxt,
 	}, "register")
 
-	// SSH tunnel upgrade endpoint. It is tracked so the hijacked
-	// connections are drained on apiserver shutdown, and it watches the
-	// apiserver dying signal inside the handler.
-	var sshTunnelHandler http.Handler
+	// SSH tunnel and relay upgrade endpoints. Both are tracked so the
+	// hijacked connections are drained on apiserver shutdown, and both
+	// watch the apiserver dying signal inside the handler.
+	var sshTunnelHandler, sshRelayHandler http.Handler
 	if srv.sshTunnelConfig != nil {
 		tunnelHandler, err := sshproxy.NewTunnelHandler(sshproxy.TunnelHandlerConfig{
 			Logger:                logger.Child("sshtunnel"),
@@ -1017,6 +1019,16 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 			return nil, errors.Trace(err)
 		}
 		sshTunnelHandler = srv.sshTunnelRequestWrapper(tunnelHandler)
+
+		relayHandler, err := sshproxy.NewRelayHandler(sshproxy.RelayHandlerConfig{
+			Logger:        logger.Child("sshtunnel"),
+			ServerFactory: srv.sshTunnelConfig.ServerFactory,
+			Metrics:       srv.sshTunnelConfig.Metrics,
+		})
+		if err != nil {
+			return nil, errors.Trace(err)
+		}
+		sshRelayHandler = srv.sshRelayRequestWrapper(relayHandler)
 	}
 
 	// HTTP handler for application offer macaroon authentication.
@@ -1148,6 +1160,15 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 				tracked:    true,
 				authorizer: machineAgentAuthorizer{},
 			},
+			handler{
+				// Unscoped: the relay endpoint is bearer-JWT
+				// authenticated and independent of the request model.
+				pattern:    "/ssh-relay/:virtualHostname",
+				methods:    []string{"GET"},
+				handler:    sshRelayHandler,
+				tracked:    true,
+				authorizer: relayJWTAuthorizer{},
+			},
 		)
 	}
 	if srv.registerIntrospectionHandlers != nil {
@@ -1187,6 +1208,29 @@ func (srv *Server) sshTunnelRequestWrapper(h http.Handler) http.Handler {
 		}
 		machineName := machineTag.Id()
 		ctx := context.WithValue(r.Context(), sshproxy.AuthenticatedMachineNameKey{}, machineName)
+		ctx = context.WithValue(ctx, sshproxy.DyingKey{}, srv.catacomb.Dying())
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// sshRelayRequestWrapper injects the relay JWT and the apiserver dying
+// signal into the request context for the SSH relay upgrade endpoint.
+// The JWT comes from the external-auth flow's permission delegator.
+func (srv *Server) sshRelayRequestWrapper(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authInfo, ok := httpcontext.RequestAuthInfo(r.Context())
+		if !ok {
+			http.Error(w, "authentication info missing", http.StatusUnauthorized)
+			return
+		}
+		delegator, ok := authInfo.Delegator.(*jwt.PermissionDelegator)
+		if !ok || delegator == nil {
+			http.Error(w, "relay requires a JWT delegator", http.StatusUnauthorized)
+			return
+		}
+		// delegator.Token was signature-verified by the JWT
+		// authenticator, so the relay handler trusts it as-is.
+		ctx := context.WithValue(r.Context(), sshproxy.RelayJWTKey{}, delegator.Token)
 		ctx = context.WithValue(ctx, sshproxy.DyingKey{}, srv.catacomb.Dying())
 		h.ServeHTTP(w, r.WithContext(ctx))
 	})

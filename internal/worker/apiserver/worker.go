@@ -65,8 +65,8 @@ type Config struct {
 	ControllerConfigService ControllerConfigService
 	ModelService            ModelService
 
-	// SSHTunnel holds the dependencies for the SSH tunnel upgrade
-	// endpoint.
+	// SSHTunnel holds the dependencies for the SSH tunnel and relay
+	// upgrade endpoints.
 	SSHTunnel *apiserver.SSHTunnelConfig
 }
 
