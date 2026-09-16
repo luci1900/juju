@@ -969,6 +969,67 @@ func (s *modelManagerSuite) TestModelInfoUsesSingleDomainServicesLookup(c *tc.C)
 	c.Assert(results.Results[0].Result, tc.NotNil)
 }
 
+// TestModelInfoDelegatedCallerWithoutLocalRecord covers a caller the
+// authorizer accepts but that has no local model-user record, for example
+// a JIMM/JAAS caller with a caller-scoped JWT.
+func (s *modelManagerSuite) TestModelInfoDelegatedCallerWithoutLocalRecord(c *tc.C) {
+	// The FakeAuthorizer grants read access to a user whose name starts
+	// with "read".
+	user := names.NewUserTag("readbob@external")
+	ctrl := s.setUpAPIWithUser(c, user)
+	defer ctrl.Finish()
+
+	modelUUID, modelTag := generateModelUUIDAndTag(c)
+	modelDomainServices := NewMockModelDomainServices(ctrl)
+	modelInfoService := NewMockModelInfoService(ctrl)
+	modelAgentService := NewMockModelAgentService(ctrl)
+	statusService := NewMockStatusService(ctrl)
+
+	s.domainServicesGetter.EXPECT().DomainServicesForModel(
+		gomock.Any(), modelUUID,
+	).Return(modelDomainServices, nil).Times(1)
+	modelDomainServices.EXPECT().ModelInfo().Return(modelInfoService)
+	modelInfoService.EXPECT().GetModelInfo(gomock.Any()).Return(coremodel.ModelInfo{
+		ControllerUUID: s.controllerUUID,
+		Cloud:          "dummy",
+		CloudType:      "dummy",
+	}, nil)
+	s.modelService.EXPECT().Model(gomock.Any(), modelUUID).Return(coremodel.Model{
+		Name:      "test-model",
+		UUID:      modelUUID,
+		Qualifier: coremodel.Qualifier("admin"),
+		ModelType: coremodel.IAAS,
+		Cloud:     "dummy",
+		CloudType: "dummy",
+	}, nil)
+	modelDomainServices.EXPECT().Agent().Return(modelAgentService)
+	modelAgentService.EXPECT().GetModelTargetAgentVersion(gomock.Any()).Return(
+		jujuversion.Current, nil,
+	)
+	modelDomainServices.EXPECT().Status().Return(statusService).Times(2)
+	now := time.Now()
+	statusService.EXPECT().GetModelStatus(gomock.Any()).Return(corestatus.StatusInfo{
+		Status: corestatus.Available,
+		Since:  &now,
+	}, nil)
+	// The caller has no local model-user record.
+	s.modelService.EXPECT().GetModelUser(gomock.Any(), modelUUID, coreuser.NameFromTag(user)).Return(
+		coremodel.ModelUserInfo{}, modelerrors.UserNotFoundOnModel,
+	)
+
+	results, err := s.api.ModelInfo(c.Context(), params.Entities{
+		Entities: []params.Entity{{Tag: modelTag.String()}},
+	})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Check(results.Results[0].Error, tc.IsNil)
+	c.Assert(results.Results[0].Result, tc.NotNil)
+	c.Assert(results.Results[0].Result.Users, tc.HasLen, 1)
+	c.Check(results.Results[0].Result.Users[0].UserName, tc.Equals, user.Name())
+	c.Check(results.Results[0].Result.Users[0].Access, tc.Equals, params.ModelReadAccess)
+	c.Check(results.Results[0].Result.Users[0].LastConnection, tc.IsNil)
+}
+
 func (s *modelManagerSuite) TestModelInfoDBNotFoundTranslated(c *tc.C) {
 	ctrl := s.setUpAPI(c)
 	defer ctrl.Finish()

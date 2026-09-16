@@ -446,12 +446,14 @@ func (api *UserManagerAPI) modelUserInfo(ctx context.Context, modelTag names.Mod
 
 	// If the user is a controller superuser, they are considered a model
 	// admin.
+	isAdmin := api.isModelAdmin(ctx, modelTag)
 	modelUserInfo, err := commonmodel.ModelUserInfo(
 		ctx,
 		api.modelService,
 		modelTag,
 		api.apiUser.Name,
-		api.isModelAdmin(ctx, modelTag),
+		isAdmin,
+		api.callerModelAccess(ctx, modelTag, isAdmin),
 	)
 	if err != nil {
 		return results, errors.Trace(err)
@@ -583,4 +585,16 @@ func (api *UserManagerAPI) isModelAdmin(ctx context.Context, modelTag names.Mode
 		return true
 	}
 	return api.authorizer.HasPermission(ctx, permission.AdminAccess, modelTag) == nil
+}
+
+// callerModelAccess returns the caller's effective access to the model,
+// derived from the authorizer.
+func (api *UserManagerAPI) callerModelAccess(ctx context.Context, modelTag names.ModelTag, isAdmin bool) permission.Access {
+	if isAdmin {
+		return permission.AdminAccess
+	}
+	if err := api.authorizer.HasPermission(ctx, permission.WriteAccess, modelTag); err == nil {
+		return permission.WriteAccess
+	}
+	return permission.ReadAccess
 }

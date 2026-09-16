@@ -13,6 +13,7 @@ import (
 	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/user"
+	modelerrors "github.com/juju/juju/domain/model/errors"
 	"github.com/juju/juju/rpc/params"
 )
 
@@ -26,8 +27,10 @@ type modelService interface {
 }
 
 // ModelUserInfo gets model user info from the modelService and converts it
-// into params.ModelUserInfo.
-func ModelUserInfo(ctx context.Context, service modelService, modelTag names.ModelTag, apiUser user.Name, isAdmin bool) ([]params.ModelUserInfo, error) {
+// into params.ModelUserInfo. access is the caller's effective access to the
+// model. A non-admin caller with no local model-user record gets their own
+// entry synthesized from access.
+func ModelUserInfo(ctx context.Context, service modelService, modelTag names.ModelTag, apiUser user.Name, isAdmin bool, access permission.Access) ([]params.ModelUserInfo, error) {
 	var userInfo []coremodel.ModelUserInfo
 	var err error
 	if isAdmin {
@@ -35,6 +38,13 @@ func ModelUserInfo(ctx context.Context, service modelService, modelTag names.Mod
 	} else {
 		var ui coremodel.ModelUserInfo
 		ui, err = service.GetModelUser(ctx, coremodel.UUID(modelTag.Id()), apiUser)
+		if errors.Is(err, modelerrors.UserNotFoundOnModel) {
+			err = nil
+			ui = coremodel.ModelUserInfo{
+				Name:   apiUser,
+				Access: access,
+			}
+		}
 		userInfo = append(userInfo, ui)
 	}
 	if err != nil {
