@@ -7,6 +7,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/juju/errors"
 	"github.com/juju/names/v6"
 	"github.com/juju/tc"
 
@@ -22,6 +23,8 @@ import (
 
 type modelUserService struct {
 	users map[coreuser.Name]coremodel.ModelUserInfo
+	// err, if set, is returned by GetModelUser instead of a lookup.
+	err error
 }
 
 func (s modelUserService) GetModelUsers(ctx context.Context, modelUUID coremodel.UUID) ([]coremodel.ModelUserInfo, error) {
@@ -33,6 +36,9 @@ func (s modelUserService) GetModelUsers(ctx context.Context, modelUUID coremodel
 }
 
 func (s modelUserService) GetModelUser(ctx context.Context, modelUUID coremodel.UUID, name coreuser.Name) (coremodel.ModelUserInfo, error) {
+	if s.err != nil {
+		return coremodel.ModelUserInfo{}, s.err
+	}
 	u, ok := s.users[name]
 	if !ok {
 		return coremodel.ModelUserInfo{}, modelerrors.UserNotFoundOnModel
@@ -93,4 +99,23 @@ func (s *modelUserSuite) TestModelUserInfoNonAdminNoRecord(c *tc.C) {
 	c.Check(info[0].DisplayName, tc.Equals, "")
 	c.Check(info[0].Access, tc.Equals, params.ModelReadAccess)
 	c.Check(info[0].LastConnection, tc.IsNil)
+}
+
+func (s *modelUserSuite) TestModelUserInfoNonAdminNoRecordWriteAccess(c *tc.C) {
+	// The synthesized access comes from the caller's effective access,
+	// not a fixed value.
+	service := modelUserService{}
+	info, err := model.ModelUserInfo(c.Context(), service, s.modelTag, s.apiUser, false, permission.WriteAccess)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(info, tc.HasLen, 1)
+	c.Check(info[0].Access, tc.Equals, params.ModelWriteAccess)
+}
+
+func (s *modelUserSuite) TestModelUserInfoNonAdminServiceErrorPropagates(c *tc.C) {
+	// Only UserNotFoundOnModel triggers synthesis. Any other error
+	// must propagate.
+	sentinel := errors.New("boom")
+	service := modelUserService{err: sentinel}
+	_, err := model.ModelUserInfo(c.Context(), service, s.modelTag, s.apiUser, false, permission.ReadAccess)
+	c.Check(err, tc.ErrorIs, sentinel)
 }

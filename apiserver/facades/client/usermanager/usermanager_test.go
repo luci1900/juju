@@ -25,6 +25,7 @@ import (
 	usererrors "github.com/juju/juju/domain/access/errors"
 	"github.com/juju/juju/domain/access/service"
 	blockcommanderrors "github.com/juju/juju/domain/blockcommand/errors"
+	modelerrors "github.com/juju/juju/domain/model/errors"
 	"github.com/juju/juju/internal/auth"
 	jujutesting "github.com/juju/juju/juju/testing"
 	"github.com/juju/juju/rpc/params"
@@ -580,6 +581,32 @@ func (s *userManagerSuite) TestModelUsersInfo(c *tc.C) {
 	sort.Sort(ByUserName(expected.Results))
 	sort.Sort(ByUserName(results.Results))
 	c.Assert(results, tc.DeepEquals, expected)
+}
+
+// TestModelUserInfoDelegatedCallerWithoutLocalRecord covers a caller the
+// authorizer accepts but that has no local model-user record, for example
+// a JIMM/JAAS caller with a caller-scoped JWT.
+func (s *userManagerSuite) TestModelUserInfoDelegatedCallerWithoutLocalRecord(c *tc.C) {
+	user := names.NewUserTag("bob@external")
+	s.setAPIUserAndAuth(c, user.Id())
+	s.authorizer.HasReadTag = user
+	defer s.setUpAPI(c).Finish()
+
+	controllerModelTag := names.NewModelTag(s.ApiServerSuite.ControllerModelUUID())
+
+	s.modelService.EXPECT().GetModelUser(
+		gomock.Any(), coremodel.UUID(s.ApiServerSuite.ControllerModelUUID()), s.apiUser.Name,
+	).Return(coremodel.ModelUserInfo{}, modelerrors.UserNotFoundOnModel)
+
+	results, err := s.api.ModelUserInfo(c.Context(), params.Entities{Entities: []params.Entity{{
+		Tag: controllerModelTag.String(),
+	}}})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(results.Results, tc.HasLen, 1)
+	c.Assert(results.Results[0].Result, tc.NotNil)
+	c.Check(results.Results[0].Result.UserName, tc.Equals, "bob@external")
+	c.Check(results.Results[0].Result.Access, tc.Equals, params.ModelReadAccess)
+	c.Check(results.Results[0].Result.LastConnection, tc.IsNil)
 }
 
 // ByUserName implements sort.Interface for []params.ModelUserInfoResult based on
