@@ -141,12 +141,12 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Block until the tunnel ends (done) or the apiserver is shutting
-	// down (dying). The watchDying goroutine closes the connection on
-	// dying, which in turn closes the done channel and lets the handler
-	// return.
+	// down (dying). Close conn explicitly on dying: watchDying may lose
+	// that race against the deferred stop() above. Close is idempotent.
 	select {
 	case <-done:
 	case <-dyingFromContext(ctx):
+		_ = conn.Close()
 	}
 }
 
