@@ -7,9 +7,10 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/net/http/httpguts"
 
 	"github.com/juju/juju/core/logger"
 	"github.com/juju/juju/internal/errors"
@@ -35,7 +36,8 @@ type DyingKey struct{}
 // The returned connection is the caller's responsibility. The HTTP server
 // no longer tracks it.
 func hijack(w http.ResponseWriter, r *http.Request, token string) (net.Conn, error) {
-	if !strings.EqualFold(r.Header.Get("Connection"), "Upgrade") || r.Header.Get("Upgrade") != token {
+	// Connection may list multiple tokens (e.g. "keep-alive, Upgrade").
+	if !httpguts.HeaderValuesContainsToken(r.Header["Connection"], "Upgrade") || r.Header.Get("Upgrade") != token {
 		http.Error(w, "invalid upgrade request", http.StatusBadRequest)
 		return nil, errors.Errorf("expected Upgrade: %s", token)
 	}
