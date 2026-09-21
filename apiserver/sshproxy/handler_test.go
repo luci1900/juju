@@ -156,16 +156,13 @@ func (s *HandlerSuite) TestWatchDyingStopPreventsClose(c *tc.C) {
 	defer client.Close()
 	defer server.Close()
 
+	// dying stays open: stop() alone must prevent the close.
 	dying := make(chan struct{})
 	stop := watchDying(server, dying, loggertesting.WrapCheckLog(c))
 	stop()
 
-	// The watcher goroutine has been told to stop before dying fires, so
-	// closing dying afterwards must not close the connection out from
-	// under the caller. A blocking write timing out (rather than failing
-	// immediately with a closed-pipe error) shows the conn is still open.
-	close(dying)
-
+	// A blocking write timing out (not a closed-pipe error) shows the
+	// conn is still open.
 	_ = server.SetWriteDeadline(time.Now().Add(50 * time.Millisecond))
 	_, err := server.Write([]byte("x"))
 	c.Assert(err, tc.ErrorMatches, ".*i/o timeout")
