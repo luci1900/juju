@@ -42,6 +42,7 @@ import (
 	resourcesdownload "github.com/juju/juju/apiserver/internal/handlers/resources/download"
 	"github.com/juju/juju/apiserver/logsink"
 	"github.com/juju/juju/apiserver/observer"
+	"github.com/juju/juju/apiserver/sshproxy"
 	"github.com/juju/juju/apiserver/stateauthenticator"
 	"github.com/juju/juju/apiserver/websocket"
 	"github.com/juju/juju/controller"
@@ -51,6 +52,7 @@ import (
 	"github.com/juju/juju/core/flightrecorder"
 	"github.com/juju/juju/core/lease"
 	corelogger "github.com/juju/juju/core/logger"
+	coremachine "github.com/juju/juju/core/machine"
 	coremodel "github.com/juju/juju/core/model"
 	"github.com/juju/juju/core/objectstore"
 	"github.com/juju/juju/core/permission"
@@ -137,6 +139,9 @@ type Server struct {
 
 	// healthStatus is returned from the health endpoint.
 	healthStatus string
+
+	// sshTunnelConfig holds the SSH tunnel endpoint dependencies.
+	sshTunnelConfig SSHTunnelConfig
 
 	// publicDNSName_ holds the value that will be returned in
 	// LoginResult.PublicDNSName. Currently this is set once and does
@@ -267,6 +272,18 @@ type ServerConfig struct {
 	// EphemeralProviderFactory is used to create providers for operations that
 	// require them, but where the provider does not need to be tracked.
 	EphemeralProviderFactory providertracker.EphemeralProviderFactory
+
+	// SSHTunnelConfig configures the SSH reverse tunnel upgrade endpoint.
+	SSHTunnelConfig SSHTunnelConfig
+}
+
+// SSHTunnelConfig holds the dependencies for the SSH tunnel upgrade
+// endpoint.
+type SSHTunnelConfig struct {
+	// TunnelTracker accepts reverse tunnel connections pushed by machine
+	// agents. It is the sshtunneler worker's output, local to this
+	// controller node.
+	TunnelTracker sshproxy.TunnelTracker
 }
 
 // Validate validates the API server configuration.
@@ -326,6 +343,9 @@ func (c ServerConfig) Validate() error {
 	}
 	if c.EphemeralProviderFactory == nil {
 		return errors.NotValidf("missing EphemeralProviderFactory")
+	}
+	if c.SSHTunnelConfig.TunnelTracker == nil {
+		return errors.NotValidf("missing SSHTunnelConfig.TunnelTracker")
 	}
 	return nil
 }
@@ -431,7 +451,8 @@ func newServer(ctx context.Context, cfg ServerConfig) (_ *Server, err error) {
 		logSink:          cfg.LogSink,
 		metricsCollector: cfg.MetricsCollector,
 
-		healthStatus: "starting",
+		healthStatus:    "starting",
+		sshTunnelConfig: cfg.SSHTunnelConfig,
 	}
 	srv.updateAgentRateLimiter(controllerConfig)
 	if err := srv.updateResourceDownloadLimiters(controllerConfig); err != nil {
@@ -978,6 +999,19 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		ctxt: httpCtxt,
 	}, "register")
 
+	// SSH tunnel upgrade endpoint. It is tracked so the hijacked
+	// connections are drained on apiserver shutdown, and it watches the
+	// apiserver dying signal inside the handler.
+	tunnelHandler, err := sshproxy.NewTunnelHandler(sshproxy.TunnelHandlerConfig{
+		Logger:                logger.Child("sshtunnel"),
+		Tracker:               srv.sshTunnelConfig.TunnelTracker,
+		SSHConnRequestService: sshTunnelRequestServiceGetter{ctxt: httpCtxt},
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	sshTunnelHandler := srv.sshTunnelRequestWrapper(tunnelHandler)
+
 	// HTTP handler for application offer macaroon authentication.
 	if err := handlerscrossmodel.AddOfferAuthHandlers(srv.shared, srv.shared.offersThirdPartyKeyPair, srv.mux, srv.shared.logger); err != nil {
 		return nil, errors.Trace(err)
@@ -1095,6 +1129,18 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		handler:    modelObjectsHTTPHandler,
 		authorizer: httpcontext.ControllerAuthorizer,
 	}}
+
+	handlers = append(handlers,
+		handler{
+			// Model-scoped so HTTP auth resolves the agent-password
+			// service from the request's model, exactly like /logsink.
+			pattern:    modelRoutePrefix + "/ssh-tunnel/:tunnelID",
+			methods:    []string{"GET"},
+			handler:    sshTunnelHandler,
+			tracked:    true,
+			authorizer: machineAgentAuthorizer{},
+		},
+	)
 	if srv.registerIntrospectionHandlers != nil {
 		add := func(subpath string, h http.Handler) {
 			handlers = append(handlers, handler{
@@ -1112,6 +1158,50 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 	}
 
 	return endpoints, nil
+}
+
+// sshTunnelRequestWrapper injects the authenticated machine name and the
+// apiserver dying signal into the request context for the SSH tunnel
+// upgrade endpoint. The machine identity is resolved from the HTTP
+// authentication layer, never from the request.
+func (srv *Server) sshTunnelRequestWrapper(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tag, err := (&httpContext{srv: srv}).authenticatedTagFromRequest(r, names.MachineTagKind)
+		if err != nil {
+			http.Error(w, "authenticated machine not found", http.StatusUnauthorized)
+			return
+		}
+		machineTag, ok := tag.(names.MachineTag)
+		if !ok {
+			http.Error(w, "authenticated entity is not a machine", http.StatusUnauthorized)
+			return
+		}
+		machineName := machineTag.Id()
+		ctx := context.WithValue(r.Context(), sshproxy.AuthenticatedMachineNameKey{}, machineName)
+		ctx = context.WithValue(ctx, sshproxy.DyingKey{}, srv.catacomb.Dying())
+		h.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// sshTunnelRequestServiceGetter resolves the model-scoped SSH connection
+// request service for a request, adapting it to the tunnel handler's
+// interface.
+type sshTunnelRequestServiceGetter struct {
+	ctxt httpContext
+}
+
+// GetSSHConnRequest returns the SSH connection request for the supplied
+// tunnel ID, scoped to the named machine.
+func (g sshTunnelRequestServiceGetter) GetSSHConnRequest(ctx context.Context, machineName string, tunnelID string) (sshproxy.SSHConnRequest, error) {
+	domainServices, err := g.ctxt.domainServicesForRequestContext(ctx)
+	if err != nil {
+		return sshproxy.SSHConnRequest{}, errors.Trace(err)
+	}
+	req, err := domainServices.SSH().GetSSHConnRequest(ctx, coremachine.Name(machineName), tunnelID)
+	if err != nil {
+		return sshproxy.SSHConnRequest{}, errors.Trace(err)
+	}
+	return sshproxy.SSHConnRequest{MachineName: req.MachineName}, nil
 }
 
 // trackRequests wraps a http.Handler, incrementing and decrementing
