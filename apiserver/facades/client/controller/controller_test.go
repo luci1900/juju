@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	stdtesting "testing"
+	"time"
 
 	"github.com/canonical/gomock/gomock"
 	"github.com/juju/errors"
@@ -927,7 +928,9 @@ func (s *accessSuite) TestAllModels(c *tc.C) {
 	)
 
 	// api user owner is "owner"
-	s.accessService.EXPECT().LastModelLogin(gomock.Any(), user.NameFromTag(testAdmin), gomock.Any()).Times(4)
+	s.accessService.EXPECT().LastModelLogins(gomock.Any(), user.NameFromTag(testAdmin), gomock.Any()).Return(
+		map[model.UUID]time.Time{}, nil,
+	)
 
 	response, err := s.controllerAPI(c).AllModels(c.Context())
 	slices.SortFunc(response.UserModels, func(x params.UserModel, y params.UserModel) int {
