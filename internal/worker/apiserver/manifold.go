@@ -17,7 +17,6 @@ import (
 	"github.com/juju/juju/apiserver"
 	"github.com/juju/juju/apiserver/apiserverhttp"
 	"github.com/juju/juju/apiserver/authentication/macaroon"
-	"github.com/juju/juju/apiserver/sshproxy"
 	"github.com/juju/juju/core/auditlog"
 	"github.com/juju/juju/core/changestream"
 	coredependency "github.com/juju/juju/core/dependency"
@@ -334,17 +333,9 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		return nil, errors.Trace(err)
 	}
 
-	// The SSH tunnel endpoint has its own metrics collector, distinct
-	// from the sshserver listener metrics.
-	sshTunnelMetrics := sshproxy.NewMetricsCollector()
-	if err := config.PrometheusRegisterer.Register(sshTunnelMetrics); err != nil {
-		return nil, errors.Trace(err)
-	}
-
 	// Register the metrics collector against the prometheus register.
 	metricsCollector := config.NewMetricsCollector()
 	if err := config.PrometheusRegisterer.Register(metricsCollector); err != nil {
-		_ = config.PrometheusRegisterer.Unregister(sshTunnelMetrics)
 		return nil, errors.Trace(err)
 	}
 
@@ -377,14 +368,12 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		EphemeralProviderFactory:          providerFactory,
 		SSHTunnel: &apiserver.SSHTunnelConfig{
 			TunnelTracker: tunnelTracker,
-			Metrics:       sshTunnelMetrics,
 		},
 	})
 	if err != nil {
 		// Ensure we clean up the resources we've registered with. This includes
 		// the state pool and the metrics collector.
 		_ = config.PrometheusRegisterer.Unregister(metricsCollector)
-		_ = config.PrometheusRegisterer.Unregister(sshTunnelMetrics)
 
 		return nil, errors.Trace(err)
 	}
@@ -395,6 +384,5 @@ func (config ManifoldConfig) start(ctx context.Context, getter dependency.Getter
 		// Ensure we clean up the resources we've registered with. This includes
 		// the state pool and the metrics collector.
 		_ = config.PrometheusRegisterer.Unregister(metricsCollector)
-		_ = config.PrometheusRegisterer.Unregister(sshTunnelMetrics)
 	}), nil
 }

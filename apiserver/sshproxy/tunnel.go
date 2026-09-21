@@ -50,8 +50,6 @@ type TunnelHandlerConfig struct {
 	// SSHConnRequestService reads the connection request to bind the
 	// tunnel ID to the authenticated machine.
 	SSHConnRequestService SSHConnRequestService
-	// Metrics collects tunnel connection metrics.
-	Metrics MetricsCollector
 }
 
 // Validate checks whether the configuration is valid.
@@ -65,16 +63,7 @@ func (cfg TunnelHandlerConfig) Validate() error {
 	if cfg.SSHConnRequestService == nil {
 		return errors.New("nil SSHConnRequestService")
 	}
-	if cfg.Metrics == nil {
-		return errors.New("nil Metrics")
-	}
 	return nil
-}
-
-// MetricsCollector counts active SSH tunnel connections.
-type MetricsCollector interface {
-	IncConnectionCount(endpoint string)
-	DecConnectionCount(endpoint string)
 }
 
 // TunnelHandler implements the model-scoped agent tunnel upgrade endpoint:
@@ -132,8 +121,6 @@ func (h *TunnelHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.config.Logger.Errorf(ctx, "upgrading tunnel connection: %v", err)
 		return
 	}
-	h.config.Metrics.IncConnectionCount("tunnel")
-	defer h.config.Metrics.DecConnectionCount("tunnel")
 	stop := watchDying(conn, dyingFromContext(ctx), h.config.Logger)
 	defer stop()
 

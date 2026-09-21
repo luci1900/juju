@@ -287,9 +287,6 @@ type SSHTunnelConfig struct {
 	// agents. It is the sshtunneler worker's output, local to this
 	// controller node.
 	TunnelTracker sshproxy.TunnelTracker
-	// Metrics collects connection metrics for the SSH tunnel upgrade
-	// endpoint.
-	Metrics sshproxy.MetricsCollector
 }
 
 // Validate validates the API server configuration.
@@ -1011,7 +1008,6 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 			Logger:                logger.Child("sshtunnel"),
 			Tracker:               srv.sshTunnelConfig.TunnelTracker,
 			SSHConnRequestService: sshTunnelRequestServiceGetter{ctxt: httpCtxt},
-			Metrics:               srv.sshTunnelConfig.Metrics,
 		})
 		if err != nil {
 			return nil, errors.Trace(err)
