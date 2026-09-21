@@ -140,9 +140,8 @@ type Server struct {
 	// healthStatus is returned from the health endpoint.
 	healthStatus string
 
-	// sshTunnelConfig holds the SSH tunnel endpoint dependencies, or nil
-	// when the endpoint is not registered.
-	sshTunnelConfig *SSHTunnelConfig
+	// sshTunnelConfig holds the SSH tunnel endpoint dependencies.
+	sshTunnelConfig SSHTunnelConfig
 
 	// publicDNSName_ holds the value that will be returned in
 	// LoginResult.PublicDNSName. Currently this is set once and does
@@ -275,9 +274,7 @@ type ServerConfig struct {
 	EphemeralProviderFactory providertracker.EphemeralProviderFactory
 
 	// SSHTunnelConfig configures the SSH reverse tunnel upgrade endpoint.
-	// If it is nil the endpoint is not registered (for example in tests
-	// that do not exercise the SSH tunnel path).
-	SSHTunnelConfig *SSHTunnelConfig
+	SSHTunnelConfig SSHTunnelConfig
 }
 
 // SSHTunnelConfig holds the dependencies for the SSH tunnel upgrade
@@ -346,6 +343,9 @@ func (c ServerConfig) Validate() error {
 	}
 	if c.EphemeralProviderFactory == nil {
 		return errors.NotValidf("missing EphemeralProviderFactory")
+	}
+	if c.SSHTunnelConfig.TunnelTracker == nil {
+		return errors.NotValidf("missing SSHTunnelConfig.TunnelTracker")
 	}
 	return nil
 }
@@ -1002,18 +1002,15 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 	// SSH tunnel upgrade endpoint. It is tracked so the hijacked
 	// connections are drained on apiserver shutdown, and it watches the
 	// apiserver dying signal inside the handler.
-	var sshTunnelHandler http.Handler
-	if srv.sshTunnelConfig != nil {
-		tunnelHandler, err := sshproxy.NewTunnelHandler(sshproxy.TunnelHandlerConfig{
-			Logger:                logger.Child("sshtunnel"),
-			Tracker:               srv.sshTunnelConfig.TunnelTracker,
-			SSHConnRequestService: sshTunnelRequestServiceGetter{ctxt: httpCtxt},
-		})
-		if err != nil {
-			return nil, errors.Trace(err)
-		}
-		sshTunnelHandler = srv.sshTunnelRequestWrapper(tunnelHandler)
+	tunnelHandler, err := sshproxy.NewTunnelHandler(sshproxy.TunnelHandlerConfig{
+		Logger:                logger.Child("sshtunnel"),
+		Tracker:               srv.sshTunnelConfig.TunnelTracker,
+		SSHConnRequestService: sshTunnelRequestServiceGetter{ctxt: httpCtxt},
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
 	}
+	sshTunnelHandler := srv.sshTunnelRequestWrapper(tunnelHandler)
 
 	// HTTP handler for application offer macaroon authentication.
 	if err := handlerscrossmodel.AddOfferAuthHandlers(srv.shared, srv.shared.offersThirdPartyKeyPair, srv.mux, srv.shared.logger); err != nil {
@@ -1133,19 +1130,17 @@ func (srv *Server) endpoints() ([]apihttp.Endpoint, error) {
 		authorizer: httpcontext.ControllerAuthorizer,
 	}}
 
-	if srv.sshTunnelConfig != nil {
-		handlers = append(handlers,
-			handler{
-				// Model-scoped so HTTP auth resolves the agent-password
-				// service from the request's model, exactly like /logsink.
-				pattern:    modelRoutePrefix + "/ssh-tunnel/:tunnelID",
-				methods:    []string{"GET"},
-				handler:    sshTunnelHandler,
-				tracked:    true,
-				authorizer: machineAgentAuthorizer{},
-			},
-		)
-	}
+	handlers = append(handlers,
+		handler{
+			// Model-scoped so HTTP auth resolves the agent-password
+			// service from the request's model, exactly like /logsink.
+			pattern:    modelRoutePrefix + "/ssh-tunnel/:tunnelID",
+			methods:    []string{"GET"},
+			handler:    sshTunnelHandler,
+			tracked:    true,
+			authorizer: machineAgentAuthorizer{},
+		},
+	)
 	if srv.registerIntrospectionHandlers != nil {
 		add := func(subpath string, h http.Handler) {
 			handlers = append(handlers, handler{

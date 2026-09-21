@@ -213,7 +213,7 @@ func NewWorker(ctx context.Context, config Config) (worker.Worker, error) {
 		ObjectStoreGetter:             config.ObjectStoreGetter,
 		WatcherRegistryGetter:         config.WatcherRegistryGetter,
 		EphemeralProviderFactory:      config.EphemeralProviderFactory,
-		SSHTunnelConfig:               config.SSHTunnel,
+		SSHTunnelConfig:               *config.SSHTunnel,
 	}
 	return config.NewServer(ctx, serverConfig)
 }
