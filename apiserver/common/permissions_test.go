@@ -10,9 +10,7 @@ import (
 	"github.com/juju/names/v6"
 	"github.com/juju/tc"
 
-	"github.com/juju/juju/apiserver/authentication"
 	"github.com/juju/juju/apiserver/common"
-	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/permission"
 	"github.com/juju/juju/core/user"
 	accesserrors "github.com/juju/juju/domain/access/errors"
@@ -227,77 +225,60 @@ func (r *PermissionSuite) TestUnknownTargetKindReturnsNoPermission(c *tc.C) {
 	c.Assert(hasPermission, tc.IsFalse)
 }
 
-// fakeAuthorizer answers HasPermission from a fixed set of granted
-// access levels, so tests can drive HighestAccess without a real
-// authorizer.
-type fakeAuthorizer struct {
-	facade.Authorizer
-
-	granted map[permission.Access]bool
-	err     error
-	calls   []permission.Access
-}
-
-func (f *fakeAuthorizer) HasPermission(_ context.Context, operation permission.Access, _ names.Tag) error {
-	f.calls = append(f.calls, operation)
-	if f.err != nil {
-		return f.err
-	}
-	if f.granted[operation] {
-		return nil
-	}
-	return authentication.ErrorEntityMissingPermission
-}
-
-func (r *PermissionSuite) TestHighestAccessReturnsFirstMatchingLevel(c *tc.C) {
+func (r *PermissionSuite) TestUserAccessLevelReturnsResolvedAccess(c *tc.C) {
+	userTag := names.NewUserTag("validuser")
 	target := names.NewModelTag("beef1beef2-0000-0000-000011112222")
-	authorizer := &fakeAuthorizer{granted: map[permission.Access]bool{
-		permission.WriteAccess: true,
-		permission.ReadAccess:  true,
-	}}
-	access, err := common.HighestAccess(c.Context(), authorizer, target, []permission.Access{
-		permission.AdminAccess,
-		permission.WriteAccess,
-		permission.ReadAccess,
-	})
+	userGetter := &fakeUserAccess{access: permission.WriteAccess}
+	access, err := common.UserAccessLevel(c.Context(), userGetter.call, userTag, target)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(access, tc.Equals, permission.WriteAccess)
-	// AdminAccess is checked and missed, then WriteAccess matches.
-	// ReadAccess is never checked once a match is found.
-	c.Check(authorizer.calls, tc.DeepEquals, []permission.Access{
-		permission.AdminAccess,
-		permission.WriteAccess,
-	})
 }
 
-func (r *PermissionSuite) TestHighestAccessNoneGranted(c *tc.C) {
+func (r *PermissionSuite) TestUserAccessLevelNoAccess(c *tc.C) {
+	userTag := names.NewUserTag("validuser")
 	target := names.NewModelTag("beef1beef2-0000-0000-000011112222")
-	authorizer := &fakeAuthorizer{granted: map[permission.Access]bool{}}
-	access, err := common.HighestAccess(c.Context(), authorizer, target, []permission.Access{
-		permission.AdminAccess,
-		permission.WriteAccess,
-		permission.ReadAccess,
-	})
+	userGetter := &fakeUserAccess{access: permission.NoAccess}
+	access, err := common.UserAccessLevel(c.Context(), userGetter.call, userTag, target)
 	c.Assert(err, tc.ErrorIsNil)
 	c.Check(access, tc.Equals, permission.NoAccess)
-	c.Check(authorizer.calls, tc.DeepEquals, []permission.Access{
-		permission.AdminAccess,
-		permission.WriteAccess,
-		permission.ReadAccess,
-	})
 }
 
-func (r *PermissionSuite) TestHighestAccessPropagatesUnexpectedError(c *tc.C) {
+func (r *PermissionSuite) TestUserAccessLevelNotFoundErrorsAreSwallowed(c *tc.C) {
+	userTag := names.NewUserTag("validuser")
 	target := names.NewModelTag("beef1beef2-0000-0000-000011112222")
-	authorizer := &fakeAuthorizer{err: errors.New("database connection failed")}
-	access, err := common.HighestAccess(c.Context(), authorizer, target, []permission.Access{
-		permission.AdminAccess,
-		permission.WriteAccess,
-	})
+	userGetter := &fakeUserAccess{
+		access: permission.NoAccess,
+		err:    accesserrors.PermissionNotFound,
+	}
+	access, err := common.UserAccessLevel(c.Context(), userGetter.call, userTag, target)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(access, tc.Equals, permission.NoAccess)
+}
+
+func (r *PermissionSuite) TestUserAccessLevelPropagatesUnexpectedError(c *tc.C) {
+	userTag := names.NewUserTag("validuser")
+	target := names.NewModelTag("beef1beef2-0000-0000-000011112222")
+	userGetter := &fakeUserAccess{
+		access: permission.NoAccess,
+		err:    errors.New("database connection failed"),
+	}
+	access, err := common.UserAccessLevel(c.Context(), userGetter.call, userTag, target)
 	c.Assert(err, tc.ErrorMatches, ".*database connection failed.*")
 	c.Check(access, tc.Equals, permission.NoAccess)
-	// The loop stops at the first unexpected error.
-	c.Check(authorizer.calls, tc.DeepEquals, []permission.Access{
-		permission.AdminAccess,
-	})
+}
+
+func (r *PermissionSuite) TestUserAccessLevelNonUserTagReturnsNoAccess(c *tc.C) {
+	machineTag := names.NewMachineTag("0")
+	target := names.NewModelTag("beef1beef2-0000-0000-000011112222")
+	access, err := common.UserAccessLevel(c.Context(), (&fakeUserAccess{}).call, machineTag, target)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(access, tc.Equals, permission.NoAccess)
+}
+
+func (r *PermissionSuite) TestUserAccessLevelUnknownTargetKindReturnsNoAccess(c *tc.C) {
+	userTag := names.NewUserTag("validuser")
+	target := names.NewMachineTag("0")
+	access, err := common.UserAccessLevel(c.Context(), (&fakeUserAccess{}).call, userTag, target)
+	c.Assert(err, tc.ErrorIsNil)
+	c.Check(access, tc.Equals, permission.NoAccess)
 }

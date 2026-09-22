@@ -271,10 +271,7 @@ func (api *CloudAPI) getCloudInfo(ctx context.Context, tag names.CloudTag) (*par
 	// caller's own entry.
 	access := permission.AdminAccess
 	if !isAdmin {
-		access, err = common.HighestAccess(ctx, api.authorizer, tag, []permission.Access{
-			permission.AdminAccess,
-			permission.AddModelAccess,
-		})
+		access, err = api.authorizer.UserAccess(ctx, tag)
 		if err != nil {
 			return nil, errors.Trace(err)
 		}
