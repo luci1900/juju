@@ -368,6 +368,23 @@ func (r *apiHandler) EntityHasPermission(
 	return nil
 }
 
+// UserAccess is responsible for reporting the access level the
+// authenticated entity has on target, resolved in a single call rather
+// than probing candidate levels one at a time via HasPermission.
+func (r *apiHandler) UserAccess(ctx context.Context, target names.Tag) (permission.Access, error) {
+	var userAccessFunc common.UserAccessFunc = func(ctx context.Context, userName user.Name, target permission.ID) (permission.Access, error) {
+		if r.authInfo.Delegator == nil {
+			return permission.NoAccess, fmt.Errorf("permissions %w for auth info", errors.NotImplemented)
+		}
+		return r.authInfo.Delegator.SubjectPermissions(ctx, userName.Name(), target)
+	}
+	access, err := common.UserAccessLevel(ctx, userAccessFunc, r.GetAuthTag(), target)
+	if err != nil {
+		return permission.NoAccess, fmt.Errorf("resolving user access: %w", err)
+	}
+	return access, nil
+}
+
 // srvCaller is our implementation of the rpcreflect.MethodCaller interface.
 // It lives just long enough to encapsulate the methods that should be
 // available for an RPC call and allow the RPC code to instantiate an object
