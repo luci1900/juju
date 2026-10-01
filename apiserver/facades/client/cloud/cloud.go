@@ -310,6 +310,11 @@ func (api *CloudAPI) getCloudInfo(ctx context.Context, tag names.CloudTag) (*par
 			DisplayName: perm.DisplayName,
 			Access:      string(perm.Access),
 		}
+		if !isAdmin {
+			// Report the access that authorized this call. The local
+			// row may be stale for callers whose grants live externally.
+			userInfo.Access = string(access)
+		}
 		info.Users = append(info.Users, userInfo)
 	}
 

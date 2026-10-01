@@ -349,6 +349,41 @@ func (s *cloudSuite) TestCloudInfoNonAdminNoLocalPermission(c *tc.C) {
 	})
 }
 
+// TestCloudInfoNonAdminStaleLocalPermission asserts that a non-admin
+// caller's own entry reports the authorizer-resolved access level, even
+// when a stale local permission row records a different level.
+func (s *cloudSuite) TestCloudInfoNonAdminStaleLocalPermission(c *tc.C) {
+	// The fake authorizer grants add-model access on my-cloud based on
+	// the username.
+	fredTag := names.NewUserTag("add-model-cloud-my-cloud")
+	ctrl := s.setup(c, fredTag)
+	defer ctrl.Finish()
+
+	permID := permission.ID{
+		ObjectType: permission.Cloud,
+		Key:        "my-cloud",
+	}
+	// The local row says admin, which no longer matches the authorizer.
+	s.cloudAccessService.EXPECT().ReadAllUserAccessForTarget(gomock.Any(), permID).Return([]permission.UserAccess{
+		{UserName: user.NameFromTag(fredTag), DisplayName: "display-fred", Access: permission.AdminAccess},
+	}, nil)
+
+	s.cloudService.EXPECT().Cloud(gomock.Any(), "my-cloud").Return(&jujucloud.Cloud{
+		Name: "dummy",
+		Type: "dummy",
+	}, nil)
+
+	result, err := s.api.CloudInfo(c.Context(), params.Entities{Entities: []params.Entity{{
+		Tag: "cloud-my-cloud",
+	}}})
+	c.Assert(err, tc.ErrorIsNil)
+	c.Assert(result.Results, tc.HasLen, 1)
+	c.Assert(result.Results[0].Error, tc.IsNil)
+	c.Check(result.Results[0].Result.Users, tc.DeepEquals, []params.CloudUserInfo{
+		{UserName: fredTag.Id(), DisplayName: "display-fred", Access: "add-model"},
+	})
+}
+
 // TestCloudInfoNoAccessDenied asserts that CloudInfo rejects a caller with
 // no access to the cloud, resolved via the authorizer, before ever
 // consulting the local user list.

@@ -441,6 +441,10 @@ func (api *UserManagerAPI) modelUserInfo(ctx context.Context, modelTag names.Mod
 		return results, errors.Trace(err)
 	}
 	if access == permission.NoAccess {
+		// Return the authorizer's error, which may carry required access.
+		if err := api.authorizer.HasPermission(ctx, permission.ReadAccess, modelTag); err != nil {
+			return results, err
+		}
 		return results, apiservererrors.ErrPerm
 	}
 
