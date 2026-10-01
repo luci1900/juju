@@ -13,7 +13,6 @@ import (
 	"gopkg.in/yaml.v2"
 
 	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/common"
 	commonmodel "github.com/juju/juju/apiserver/common/model"
 	apiservererrors "github.com/juju/juju/apiserver/errors"
 	"github.com/juju/juju/apiserver/facade"
@@ -892,11 +891,7 @@ func (m *ModelManagerAPI) ModelInfo(ctx context.Context, args params.Entities) (
 		access := permission.AdminAccess
 		if !m.isAdmin {
 			var err error
-			access, err = common.HighestAccess(ctx, m.authorizer, tag, []permission.Access{
-				permission.AdminAccess,
-				permission.WriteAccess,
-				permission.ReadAccess,
-			})
+			access, err = m.authorizer.UserAccess(ctx, tag)
 			if err != nil {
 				return params.ModelInfo{}, errors.Trace(err)
 			}

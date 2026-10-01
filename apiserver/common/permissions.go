@@ -8,8 +8,6 @@ import (
 
 	"github.com/juju/names/v6"
 
-	"github.com/juju/juju/apiserver/authentication"
-	"github.com/juju/juju/apiserver/facade"
 	"github.com/juju/juju/core/permission"
 	coreuser "github.com/juju/juju/core/user"
 	accesserrors "github.com/juju/juju/domain/access/errors"
@@ -20,6 +18,25 @@ import (
 // level of access a user has for a given target.
 type UserAccessFunc func(ctx context.Context, userName coreuser.Name, target permission.ID) (permission.Access, error)
 
+// tagKindPermission describes how a tag kind maps onto a permission
+// object type, along with the validator for access levels on that
+// object type.
+type tagKindPermission struct {
+	objectType permission.ObjectType
+	validate   func(permission.Access) error
+}
+
+// permissionsByTagKind is the single source of truth for which tag
+// kinds carry permissions, and how. Both HasPermission and
+// UserAccessLevel look up here rather than maintaining their own
+// copies of this mapping, so the two can't drift out of sync.
+var permissionsByTagKind = map[string]tagKindPermission{
+	names.ControllerTagKind:       {permission.Controller, permission.ValidateControllerAccess},
+	names.ModelTagKind:            {permission.Model, permission.ValidateModelAccess},
+	names.ApplicationOfferTagKind: {permission.Offer, permission.ValidateOfferAccess},
+	names.CloudTagKind:            {permission.Cloud, permission.ValidateCloudAccess},
+}
+
 // HasPermission returns true if the specified user has the specified
 // permission on target.
 func HasPermission(
@@ -29,25 +46,12 @@ func HasPermission(
 	requestedPermission permission.Access,
 	target names.Tag,
 ) (bool, error) {
-	var objectType permission.ObjectType
-	var validate func(permission.Access) error
-	switch target.Kind() {
-	case names.ControllerTagKind:
-		objectType = permission.Controller
-		validate = permission.ValidateControllerAccess
-	case names.ModelTagKind:
-		objectType = permission.Model
-		validate = permission.ValidateModelAccess
-	case names.ApplicationOfferTagKind:
-		objectType = permission.Offer
-		validate = permission.ValidateOfferAccess
-	case names.CloudTagKind:
-		objectType = permission.Cloud
-		validate = permission.ValidateCloudAccess
-	default:
+	tkp, ok := permissionsByTagKind[target.Kind()]
+	if !ok {
 		return false, nil
 	}
-	if err := validate(requestedPermission); err != nil {
+	objectType := tkp.objectType
+	if err := tkp.validate(requestedPermission); err != nil {
 		return false, nil
 	}
 
@@ -82,24 +86,39 @@ func HasPermission(
 	return true, nil
 }
 
-// HighestAccess returns the first level in levels (given highest first)
-// that the authorizer grants the caller on target, or
-// [permission.NoAccess] if none match. Any error other than the caller
-// missing the checked permission is returned immediately.
-func HighestAccess(
+// UserAccessLevel resolves the caller's access level on target in a
+// single call, using accessGetter directly rather than probing candidate
+// levels one at a time. It returns [permission.NoAccess] if the caller's
+// tag is not a user, the tag kind has no associated permission object
+// type, or the user has no access recorded for the target.
+func UserAccessLevel(
 	ctx context.Context,
-	authorizer facade.Authorizer,
+	accessGetter UserAccessFunc,
+	utag names.Tag,
 	target names.Tag,
-	levels []permission.Access,
 ) (permission.Access, error) {
-	for _, access := range levels {
-		err := authorizer.HasPermission(ctx, access, target)
-		if err == nil {
-			return access, nil
-		}
-		if !errors.Is(err, authentication.ErrorEntityMissingPermission) {
-			return permission.NoAccess, errors.Capture(err)
-		}
+	tkp, ok := permissionsByTagKind[target.Kind()]
+	if !ok {
+		return permission.NoAccess, nil
 	}
-	return permission.NoAccess, nil
+	objectType := tkp.objectType
+
+	userTag, ok := utag.(names.UserTag)
+	if !ok {
+		// Reveal no more than is strictly necessary.
+		return permission.NoAccess, nil
+	}
+
+	userAccess, err := accessGetter(ctx, coreuser.NameFromTag(userTag), permission.ID{
+		ObjectType: objectType,
+		Key:        target.Id(),
+	})
+	if err != nil && !errors.IsOneOf(err,
+		accesserrors.AccessNotFound,
+		accesserrors.UserNotFound,
+		accesserrors.PermissionNotFound,
+	) {
+		return permission.NoAccess, errors.Errorf("while obtaining %s user: %w", target.Kind(), err)
+	}
+	return userAccess, nil
 }
