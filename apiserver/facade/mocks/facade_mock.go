@@ -38,6 +38,7 @@ type MockAuthorizerMockRecorder struct {
 	entityHasPermissionExpects  []*gomock.Call4_1[context.Context, names.Tag, permission.Access, names.Tag, error]
 	getAuthTagExpects           []*gomock.Call0_1[names.Tag]
 	hasPermissionExpects        []*gomock.Call3_1[context.Context, permission.Access, names.Tag, error]
+	userAccessExpects           []*gomock.Call2_2[context.Context, names.Tag, permission.Access, error]
 }
 
 // NewMockAuthorizer creates a new mock instance.
@@ -231,6 +232,24 @@ func (mr *MockAuthorizerMockRecorder) HasPermission(ctx, operation, target any) 
 
 // MockAuthorizerHasPermissionCall is the typed call wrapper for HasPermission.
 type MockAuthorizerHasPermissionCall = gomock.Call3_1[context.Context, permission.Access, names.Tag, error]
+
+// UserAccess mocks base method.
+func (m *MockAuthorizer) UserAccess(ctx context.Context, target names.Tag) (permission.Access, error) {
+	m.ctrl.T.Helper()
+	return gomock.Dispatch2_2(&m.recorder.userAccessExpects, m.ctrl, m, "UserAccess", ctx, target)
+}
+
+// UserAccess indicates an expected call of UserAccess.
+func (mr *MockAuthorizerMockRecorder) UserAccess(ctx, target any) *MockAuthorizerUserAccessCall {
+	mr.mock.ctrl.T.Helper()
+	call := gomock.NewCall2_2[context.Context, names.Tag, permission.Access, error](mr.mock.ctrl.T, mr.mock, "UserAccess", gomock.EnsureMatcher(ctx), gomock.EnsureMatcher(target))
+	mr.userAccessExpects = append(mr.userAccessExpects, call)
+	mr.mock.ctrl.Track(call.Call)
+	return call
+}
+
+// MockAuthorizerUserAccessCall is the typed call wrapper for UserAccess.
+type MockAuthorizerUserAccessCall = gomock.Call2_2[context.Context, names.Tag, permission.Access, error]
 
 // MockWatcherRegistry is a mock of WatcherRegistry interface.
 type MockWatcherRegistry struct {

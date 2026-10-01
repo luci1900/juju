@@ -436,11 +436,7 @@ func (api *UserManagerAPI) ModelUserInfo(ctx context.Context, args params.Entiti
 func (api *UserManagerAPI) modelUserInfo(ctx context.Context, modelTag names.ModelTag) ([]params.ModelUserInfoResult, error) {
 	var results []params.ModelUserInfoResult
 
-	access, err := common.HighestAccess(ctx, api.authorizer, modelTag, []permission.Access{
-		permission.AdminAccess,
-		permission.WriteAccess,
-		permission.ReadAccess,
-	})
+	access, err := api.authorizer.UserAccess(ctx, modelTag)
 	if err != nil {
 		return results, errors.Trace(err)
 	}
