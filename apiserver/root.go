@@ -348,13 +348,7 @@ func (r *apiHandler) HasPermission(ctx context.Context, operation permission.Acc
 func (r *apiHandler) EntityHasPermission(
 	ctx context.Context, entity names.Tag, operation permission.Access, target names.Tag,
 ) error {
-	var userAccessFunc common.UserAccessFunc = func(ctx context.Context, userName user.Name, target permission.ID) (permission.Access, error) {
-		if r.authInfo.Delegator == nil {
-			return permission.NoAccess, fmt.Errorf("permissions %w for auth info", errors.NotImplemented)
-		}
-		return r.authInfo.Delegator.SubjectPermissions(ctx, userName.Name(), target)
-	}
-	has, err := common.HasPermission(ctx, userAccessFunc, entity, operation, target)
+	has, err := common.HasPermission(ctx, r.subjectPermissions, entity, operation, target)
 	if err != nil {
 		return fmt.Errorf("checking entity %q has permission: %w", entity, err)
 	}
@@ -366,6 +360,28 @@ func (r *apiHandler) EntityHasPermission(
 	}
 
 	return nil
+}
+
+// UserAccess is responsible for reporting the access level the
+// authenticated entity has on target, resolved in a single call rather
+// than probing candidate levels one at a time via HasPermission.
+func (r *apiHandler) UserAccess(ctx context.Context, target names.Tag) (permission.Access, error) {
+	access, err := common.UserAccessLevel(ctx, r.subjectPermissions, r.GetAuthTag(), target)
+	if err != nil {
+		return permission.NoAccess, fmt.Errorf("resolving user access: %w", err)
+	}
+	return access, nil
+}
+
+// subjectPermissions implements [common.UserAccessFunc] by asking the
+// auth info's delegator for the user's access on target.
+func (r *apiHandler) subjectPermissions(
+	ctx context.Context, userName user.Name, target permission.ID,
+) (permission.Access, error) {
+	if r.authInfo.Delegator == nil {
+		return permission.NoAccess, fmt.Errorf("permissions %w for auth info", errors.NotImplemented)
+	}
+	return r.authInfo.Delegator.SubjectPermissions(ctx, userName.Name(), target)
 }
 
 // srvCaller is our implementation of the rpcreflect.MethodCaller interface.

@@ -108,10 +108,10 @@ func nameBasedHasPermission(name string, operation permission.Access, target nam
 	switch {
 	case strings.HasPrefix(name, string(permission.SuperuserAccess)):
 		return operation == permission.SuperuserAccess
-	case strings.HasPrefix(name, string(permission.AddModelAccess)):
-		return operation == permission.AddModelAccess
 	case strings.HasPrefix(name, string(permission.LoginAccess)):
 		return operation == permission.LoginAccess
+	case strings.HasPrefix(name, string(permission.AddModelAccess)):
+		perm = permission.AddModelAccess
 	case strings.HasPrefix(name, string(permission.AdminAccess)):
 		perm = permission.AdminAccess
 	case strings.HasPrefix(name, string(permission.WriteAccess)):
@@ -154,4 +154,34 @@ func (fa FakeAuthorizer) EntityHasPermission(ctx context.Context, entity names.T
 		return nil
 	}
 	return errors.WithType(apiservererrors.ErrPerm, authentication.ErrorEntityMissingPermission)
+}
+
+// UserAccess returns the first access level, from the ordered candidate
+// list for target's tag kind (highest first), for which HasPermission
+// succeeds. Returns permission.NoAccess if the tag kind is unrecognised
+// or none match.
+func (fa FakeAuthorizer) UserAccess(ctx context.Context, target names.Tag) (permission.Access, error) {
+	var levels []permission.Access
+	switch target.Kind() {
+	case names.ControllerTagKind:
+		levels = []permission.Access{permission.SuperuserAccess, permission.LoginAccess}
+	case names.ModelTagKind:
+		levels = []permission.Access{permission.AdminAccess, permission.WriteAccess, permission.ReadAccess}
+	case names.ApplicationOfferTagKind:
+		levels = []permission.Access{permission.AdminAccess, permission.ConsumeAccess, permission.ReadAccess}
+	case names.CloudTagKind:
+		levels = []permission.Access{permission.AdminAccess, permission.AddModelAccess}
+	default:
+		return permission.NoAccess, nil
+	}
+	for _, access := range levels {
+		err := fa.HasPermission(ctx, access, target)
+		if err == nil {
+			return access, nil
+		}
+		if !errors.Is(err, authentication.ErrorEntityMissingPermission) {
+			return permission.NoAccess, err
+		}
+	}
+	return permission.NoAccess, nil
 }
