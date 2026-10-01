@@ -1427,18 +1427,24 @@ AND       u.name = $dbName.name
 
 	var modelUser dbModelUserInfo
 	err = db.Txn(ctx, func(ctx context.Context, tx *sqlair.TX) error {
-		// The left join below returns a row for any existing user, even
-		// when the model does not exist, so check the model first.
+		modelUser = dbModelUserInfo{}
+		err := tx.Query(ctx, stmt, uuid, userName).Get(&modelUser)
+		if err != nil && !errors.Is(err, sqlair.ErrNoRows) {
+			return errors.Capture(err)
+		}
+		// A permission row implies the model exists. Otherwise the left
+		// join can't tell a missing model from a missing grant, so check
+		// the model only in that case.
+		if err == nil && modelUser.AccessType != "" {
+			return nil
+		}
 		if _, err := GetModel(ctx, tx, modelUUID); err != nil {
 			return errors.Capture(err)
 		}
-		err := tx.Query(ctx, stmt, uuid, userName).Get(&modelUser)
 		if errors.Is(err, sqlair.ErrNoRows) {
 			return errors.Errorf(
 				"user %q not found on model", name,
 			).Add(modelerrors.UserNotFoundOnModel)
-		} else if err != nil {
-			return errors.Capture(err)
 		}
 		return nil
 	})
