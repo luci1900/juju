@@ -47,33 +47,13 @@ func HasPermission(
 	target names.Tag,
 ) (bool, error) {
 	tkp, ok := permissionsByTagKind[target.Kind()]
-	if !ok {
-		return false, nil
-	}
-	objectType := tkp.objectType
-	if err := tkp.validate(requestedPermission); err != nil {
+	if !ok || tkp.validate(requestedPermission) != nil {
 		return false, nil
 	}
 
-	userTag, ok := utag.(names.UserTag)
-	if !ok {
-		// Reveal no more than is strictly necessary.
-		return false, nil
-	}
-
-	userAccess, err := accessGetter(ctx, coreuser.NameFromTag(userTag), permission.ID{
-		ObjectType: objectType,
-		Key:        target.Id(),
-	})
-	if err != nil && !errors.IsOneOf(err,
-		accesserrors.AccessNotFound,
-		accesserrors.UserNotFound,
-		accesserrors.PermissionNotFound,
-	) {
-		return false, errors.Errorf("while obtaining %s user: %w", target.Kind(), err)
-	}
-	if userAccess == permission.NoAccess {
-		return false, nil
+	userAccess, err := UserAccessLevel(ctx, accessGetter, utag, target)
+	if err != nil || userAccess == permission.NoAccess {
+		return false, err
 	}
 
 	modelPermission := userAccess.EqualOrGreaterModelAccessThan(requestedPermission) && target.Kind() == names.ModelTagKind
