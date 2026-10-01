@@ -890,7 +890,6 @@ func (m *ModelManagerAPI) ModelInfo(ctx context.Context, args params.Entities) (
 		}
 		access := permission.AdminAccess
 		if !m.isAdmin {
-			var err error
 			access, err = m.authorizer.UserAccess(ctx, tag)
 			if err != nil {
 				return params.ModelInfo{}, errors.Trace(err)
