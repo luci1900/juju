@@ -104,10 +104,8 @@ type serverWrapperWorker struct {
 	m sync.RWMutex
 }
 
-// NewServerWrapperWorker returns a new worker that runs an ssh server worker internally.
-// This worker will listen for changes in the controller configuration and replace the
-// inner server worker, without stopping itself, when the port or max concurrent
-// connections changes.
+// NewServerWrapperWorker returns a new worker that runs an ssh server worker
+// internally, restarting it when its config changes.
 func NewServerWrapperWorker(config ServerWrapperWorkerConfig) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
@@ -209,9 +207,11 @@ func (ssw *serverWrapperWorker) loop() error {
 			}
 			if maxConns == config.SSHMaxConcurrentConnections() &&
 				port == config.SSHServerPort() {
-				ssw.config.Logger.Debugf(ctx, "controller configuration changed, but nothing changed for the ssh server")
 				continue
 			}
+
+			ssw.config.Logger.Debugf(ctx, "restarting ssh server with max concurrent connections %d",
+				config.SSHMaxConcurrentConnections())
 
 			// Wait for the old server so it releases the port before the
 			// new one binds.
