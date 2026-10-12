@@ -105,8 +105,9 @@ type serverWrapperWorker struct {
 }
 
 // NewServerWrapperWorker returns a new worker that runs an ssh server worker internally.
-// This worker will listen for changes in the controller configuration and restart the
-// server worker when the port or max concurrent connections changes.
+// This worker will listen for changes in the controller configuration and replace the
+// inner server worker, without stopping itself, when the port or max concurrent
+// connections changes.
 func NewServerWrapperWorker(config ServerWrapperWorkerConfig) (worker.Worker, error) {
 	if err := config.Validate(); err != nil {
 		return nil, errors.Trace(err)
@@ -187,23 +188,8 @@ func (ssw *serverWrapperWorker) loop() error {
 		return errors.Trace(err)
 	}
 
-	srv, err := ssw.config.NewServerWorker(ServerWorkerConfig{
-		Logger:                   ssw.config.Logger,
-		JumpHostKey:              jumpHostKey,
-		Port:                     port,
-		MaxConcurrentConnections: maxConns,
-		SSHService:               ssw.config.SSHService,
-		Authenticator:            ssw.config.Authenticator,
-		Authorizer:               ssw.config.Authorizer,
-		ServerFactory:            ssw.config.ServerFactory,
-		Metrics:                  ssw.config.Metrics,
-		Clock:                    ssw.config.Clock,
-	})
-	ssw.addWorkerReporter("ssh-server", srv)
+	srv, err := ssw.startServer(jumpHostKey, port, maxConns)
 	if err != nil {
-		return errors.Trace(err)
-	}
-	if err := ssw.catacomb.Add(srv); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -226,9 +212,48 @@ func (ssw *serverWrapperWorker) loop() error {
 				ssw.config.Logger.Debugf(ctx, "controller configuration changed, but nothing changed for the ssh server")
 				continue
 			}
-			return errors.New("changes detected, stopping SSH server worker")
+
+			// Wait for the old server so it releases the port before the
+			// new one binds.
+			srv.Kill()
+			if err := srv.Wait(); err != nil {
+				return errors.Trace(err)
+			}
+
+			port = config.SSHServerPort()
+			maxConns = config.SSHMaxConcurrentConnections()
+			srv, err = ssw.startServer(jumpHostKey, port, maxConns)
+			if err != nil {
+				return errors.Trace(err)
+			}
 		}
 	}
+}
+
+// startServer starts a jump server worker and adds it to the catacomb.
+func (ssw *serverWrapperWorker) startServer(
+	jumpHostKey string, port, maxConns int,
+) (worker.Worker, error) {
+	srv, err := ssw.config.NewServerWorker(ServerWorkerConfig{
+		Logger:                   ssw.config.Logger,
+		JumpHostKey:              jumpHostKey,
+		Port:                     port,
+		MaxConcurrentConnections: maxConns,
+		SSHService:               ssw.config.SSHService,
+		Authenticator:            ssw.config.Authenticator,
+		Authorizer:               ssw.config.Authorizer,
+		ServerFactory:            ssw.config.ServerFactory,
+		Metrics:                  ssw.config.Metrics,
+		Clock:                    ssw.config.Clock,
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+	ssw.addWorkerReporter("ssh-server", srv)
+	if err := ssw.catacomb.Add(srv); err != nil {
+		return nil, errors.Trace(err)
+	}
+	return srv, nil
 }
 
 // addWorkerReporter adds the worker to the workerReporters map if the type assertion

@@ -5,7 +5,6 @@ package sshserver
 
 import (
 	"context"
-	"sync/atomic"
 	"testing"
 
 	"github.com/canonical/gomock/gomock"
@@ -229,17 +228,23 @@ func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorker(c *tc.C) {
 		).
 		Times(1)
 
-	var serverStarted int32
+	newServerWorker := workertest.NewErrorWorker(nil)
+	defer workertest.DirtyKill(c, newServerWorker)
+
+	workers := []worker.Worker{serverWorker, newServerWorker}
+	started := make(chan ServerWorkerConfig, len(workers))
+	var next int
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
 		SSHService:              stubSSHService{jumpHostKey: testHostKey, virtualHostKey: testHostKey},
 		Logger:                  loggertesting.WrapCheckLog(c),
 		Metrics:                 NewMetricsCollector(),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
-			atomic.StoreInt32(&serverStarted, 1)
-			c.Check(swc.Port, tc.Equals, 22)
 			c.Check(swc.JumpHostKey, tc.Equals, testHostKey)
-			return serverWorker, nil
+			w := workers[next]
+			next++
+			started <- swc
+			return w, nil
 		},
 	}
 	setMockServerDependencies(ctrl, &cfg)
@@ -252,23 +257,29 @@ func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorker(c *tc.C) {
 	workertest.CheckAlive(c, serverWorker)
 	workertest.CheckAlive(c, controllerConfigWatcher)
 
-	c.Check(atomic.LoadInt32(&serverStarted), tc.Equals, int32(1))
+	first := <-started
+	c.Check(first.Port, tc.Equals, 22)
+	c.Check(first.MaxConcurrentConnections, tc.Equals, 10)
 
-	// Send some changes to restart the server (expect no changes).
+	// Unchanged config: the server is not replaced.
 	ch <- nil
-
 	workertest.CheckAlive(c, w)
+	workertest.CheckAlive(c, serverWorker)
+	c.Check(started, tc.HasLen, 0)
 
-	// Send some changes to restart the server (expect the worker to restart).
+	// Changed config: the server is replaced and the wrapper stays up.
 	ch <- nil
+	second := <-started
+	c.Check(second.Port, tc.Equals, 22)
+	c.Check(second.MaxConcurrentConnections, tc.Equals, 15)
 
-	err = workertest.CheckKilled(c, w)
-	c.Check(err, tc.ErrorMatches, "changes detected, stopping SSH server worker")
-
-	// Check all workers killed.
-	c.Check(workertest.CheckKilled(c, w), tc.ErrorMatches, "changes detected, stopping SSH server worker")
 	c.Check(workertest.CheckKilled(c, serverWorker), tc.ErrorIsNil)
-	c.Check(workertest.CheckKilled(c, controllerConfigWatcher), tc.ErrorIsNil)
+	workertest.CheckAlive(c, w)
+	workertest.CheckAlive(c, newServerWorker)
+	workertest.CheckAlive(c, controllerConfigWatcher)
+
+	workertest.CleanKill(c, w)
+	c.Check(workertest.CheckKilled(c, newServerWorker), tc.ErrorIsNil)
 }
 
 func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorkerOnPortChange(c *tc.C) {
@@ -319,15 +330,23 @@ func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorkerOnPortChange
 		).
 		Times(1)
 
+	newServerWorker := workertest.NewErrorWorker(nil)
+	defer workertest.DirtyKill(c, newServerWorker)
+
+	workers := []worker.Worker{serverWorker, newServerWorker}
+	started := make(chan ServerWorkerConfig, len(workers))
+	var next int
 	cfg := ServerWrapperWorkerConfig{
 		ControllerConfigService: controllerConfigService,
 		SSHService:              stubSSHService{jumpHostKey: testHostKey, virtualHostKey: testHostKey},
 		Logger:                  loggertesting.WrapCheckLog(c),
 		Metrics:                 NewMetricsCollector(),
 		NewServerWorker: func(swc ServerWorkerConfig) (worker.Worker, error) {
-			c.Check(swc.Port, tc.Equals, 22)
 			c.Check(swc.JumpHostKey, tc.Equals, testHostKey)
-			return serverWorker, nil
+			w := workers[next]
+			next++
+			started <- swc
+			return w, nil
 		},
 	}
 	setMockServerDependencies(ctrl, &cfg)
@@ -339,14 +358,27 @@ func (s *workerSuite) TestSSHServerWrapperWorkerRestartsServerWorkerOnPortChange
 	workertest.CheckAlive(c, serverWorker)
 	workertest.CheckAlive(c, controllerConfigWatcher)
 
+	first := <-started
+	c.Check(first.Port, tc.Equals, 22)
+
 	// First change: no restart expected.
 	ch <- nil
 	workertest.CheckAlive(c, w)
+	workertest.CheckAlive(c, serverWorker)
+	c.Check(started, tc.HasLen, 0)
 
-	// Second change: port changed, restart expected.
+	// Second change: port changed, server replaced and the wrapper stays up.
 	ch <- nil
-	err = workertest.CheckKilled(c, w)
-	c.Check(err, tc.ErrorMatches, "changes detected, stopping SSH server worker")
+	second := <-started
+	c.Check(second.Port, tc.Equals, 23)
+	c.Check(second.MaxConcurrentConnections, tc.Equals, 10)
+
+	c.Check(workertest.CheckKilled(c, serverWorker), tc.ErrorIsNil)
+	workertest.CheckAlive(c, w)
+	workertest.CheckAlive(c, newServerWorker)
+
+	workertest.CleanKill(c, w)
+	c.Check(workertest.CheckKilled(c, newServerWorker), tc.ErrorIsNil)
 }
 
 func (s *workerSuite) TestSSHServerWrapperWorkerConfigWatcherClosed(c *tc.C) {
