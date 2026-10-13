@@ -6,6 +6,7 @@ package sshserver
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/canonical/gomock/gomock"
 	"github.com/juju/clock"
@@ -460,13 +461,22 @@ func (s *workerSuite) TestWrapperWorkerReport(c *tc.C) {
 	reporter, ok := w.(worker.Reporter)
 	c.Assert(ok, tc.IsTrue)
 
-	c.Assert(reporter.Report(c.Context()), tc.DeepEquals, map[string]any{
-		"workers": map[string]any{
-			"ssh-server": map[string]any{
-				"test": "test",
-			},
-		},
-	})
+	// The server starts asynchronously, so wait for it to be reported.
+	var server map[string]any
+	for server == nil {
+		workers, _ := reporter.Report(c.Context())["workers"].(map[string]any)
+		if s, ok := workers[serverWorkerName].(map[string]any); ok && s[worker.KeyReport] != nil {
+			server = s
+			break
+		}
+		select {
+		case <-c.Context().Done():
+			c.Fatalf("server worker never reported")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	c.Check(server[worker.KeyState], tc.Equals, "started")
+	c.Check(server[worker.KeyReport], tc.DeepEquals, map[string]any{"test": "test"})
 }
 
 // reportWorker is a mock worker that implements the Reporter interface.

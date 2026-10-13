@@ -5,7 +5,6 @@ package sshserver
 
 import (
 	"context"
-	"sync"
 
 	"github.com/juju/clock"
 	"github.com/juju/errors"
@@ -17,7 +16,11 @@ import (
 	coremachine "github.com/juju/juju/core/machine"
 	"github.com/juju/juju/core/virtualhostname"
 	"github.com/juju/juju/core/watcher"
+	internalworker "github.com/juju/juju/internal/worker"
 )
+
+// serverWorkerName is the runner ID and report key of the inner server worker.
+const serverWorkerName = "ssh-server"
 
 // ControllerConfigService is the interface that the worker uses to get the
 // controller configuration.
@@ -97,11 +100,8 @@ type serverWrapperWorker struct {
 	// config holds the configuration required by the server wrapper worker.
 	config ServerWrapperWorkerConfig
 
-	// workerReporters holds the maps of worker reporters.
-	workerReporters map[string]worker.Reporter
-
-	// m holds the mutex to gate access to the workerReporters map
-	m sync.RWMutex
+	// runner runs the inner server worker.
+	runner *worker.Runner
 }
 
 // NewServerWrapperWorker returns a new worker that runs an ssh server worker
@@ -111,15 +111,25 @@ func NewServerWrapperWorker(config ServerWrapperWorkerConfig) (worker.Worker, er
 		return nil, errors.Trace(err)
 	}
 
+	runner, err := worker.NewRunner(worker.RunnerParams{
+		Name:   "ssh-server",
+		Clock:  config.Clock,
+		Logger: internalworker.WrapLogger(config.Logger),
+	})
+	if err != nil {
+		return nil, errors.Trace(err)
+	}
+
 	w := &serverWrapperWorker{
-		config:          config,
-		workerReporters: map[string]worker.Reporter{},
+		config: config,
+		runner: runner,
 	}
 
 	if err := catacomb.Invoke(catacomb.Plan{
 		Name: "ssh-server",
 		Site: &w.catacomb,
 		Work: w.loop,
+		Init: []worker.Worker{runner},
 	}); err != nil {
 		return nil, errors.Trace(err)
 	}
@@ -144,18 +154,9 @@ func (ssw *serverWrapperWorker) Wait() error {
 	return ssw.catacomb.Wait()
 }
 
-// Report calls the report methods in the workerReporters map to collect and return
-// report maps to the inspection worker.
+// Report returns the runner's report, which includes the server worker.
 func (ssw *serverWrapperWorker) Report(ctx context.Context) map[string]any {
-	ssw.m.RLock()
-	defer ssw.m.RUnlock()
-	reports := map[string]any{}
-	for name, reporter := range ssw.workerReporters {
-		reports[name] = reporter.Report(ctx)
-	}
-	return map[string]any{
-		"workers": reports,
-	}
+	return ssw.runner.Report(ctx)
 }
 
 // loop is the main loop of the server wrapper worker. It starts the server worker
@@ -172,7 +173,6 @@ func (ssw *serverWrapperWorker) loop() error {
 	if err := ssw.catacomb.Add(controllerConfigWatcher); err != nil {
 		return errors.Trace(err)
 	}
-	ssw.addWorkerReporter("controller-watcher", controllerConfigWatcher)
 
 	config, err := ssw.config.ControllerConfigService.ControllerConfig(ctx)
 	if err != nil {
@@ -186,8 +186,7 @@ func (ssw *serverWrapperWorker) loop() error {
 		return errors.Trace(err)
 	}
 
-	srv, err := ssw.startServer(jumpHostKey, port, maxConns)
-	if err != nil {
+	if err := ssw.startServer(ctx, jumpHostKey, port, maxConns); err != nil {
 		return errors.Trace(err)
 	}
 
@@ -215,26 +214,25 @@ func (ssw *serverWrapperWorker) loop() error {
 
 			// Wait for the old server so it releases the port before the
 			// new one binds.
-			srv.Kill()
-			if err := srv.Wait(); err != nil {
+			err = ssw.runner.StopAndRemoveWorker(serverWorkerName, ssw.catacomb.Dying())
+			if err != nil {
 				return errors.Trace(err)
 			}
 
 			port = config.SSHServerPort()
 			maxConns = config.SSHMaxConcurrentConnections()
-			srv, err = ssw.startServer(jumpHostKey, port, maxConns)
-			if err != nil {
+			if err := ssw.startServer(ctx, jumpHostKey, port, maxConns); err != nil {
 				return errors.Trace(err)
 			}
 		}
 	}
 }
 
-// startServer starts a jump server worker and adds it to the catacomb.
+// startServer starts a jump server worker in the runner.
 func (ssw *serverWrapperWorker) startServer(
-	jumpHostKey string, port, maxConns int,
-) (worker.Worker, error) {
-	srv, err := ssw.config.NewServerWorker(ServerWorkerConfig{
+	ctx context.Context, jumpHostKey string, port, maxConns int,
+) error {
+	serverConfig := ServerWorkerConfig{
 		Logger:                   ssw.config.Logger,
 		JumpHostKey:              jumpHostKey,
 		Port:                     port,
@@ -245,24 +243,9 @@ func (ssw *serverWrapperWorker) startServer(
 		ServerFactory:            ssw.config.ServerFactory,
 		Metrics:                  ssw.config.Metrics,
 		Clock:                    ssw.config.Clock,
-	})
-	if err != nil {
-		return nil, errors.Trace(err)
 	}
-	ssw.addWorkerReporter("ssh-server", srv)
-	if err := ssw.catacomb.Add(srv); err != nil {
-		return nil, errors.Trace(err)
+	start := func(context.Context) (worker.Worker, error) {
+		return ssw.config.NewServerWorker(serverConfig)
 	}
-	return srv, nil
-}
-
-// addWorkerReporter adds the worker to the workerReporters map if the type assertion
-// to worker.Reporter is successful.
-func (ssw *serverWrapperWorker) addWorkerReporter(name string, w worker.Worker) {
-	ssw.m.Lock()
-	defer ssw.m.Unlock()
-	reporter, ok := w.(worker.Reporter)
-	if ok {
-		ssw.workerReporters[name] = reporter
-	}
+	return errors.Trace(ssw.runner.StartWorker(ctx, serverWorkerName, start))
 }
